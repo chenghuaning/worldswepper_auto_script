@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         WorldSweeper (Pixel-Perfect Oracle & Treasure Hunter)
+// @name         WorldSweeper (Pixel-Perfect Oracle & Treasure Hunter - Turbo Spiral)
 // @namespace    https://github.com/chenghuaning/worldswepper_auto_script
-// @version      29.0.0
-// @description  全知透视扫雷：内置 React Fiber 自动状态捕获（免 DevTools）、原生数学避雷、宝箱/金币秒抢、ESC/空格急停。
+// @version      33.0.0
+// @description  全知透视扫雷【螺旋轰炸修正版】：修复开局扫海洋秒停问题、以出生点为中心高速引爆、神殿自动秒退、视窗解离零抖动。
 // @author       WorldSweeper Engineering Team
 // @license      MIT
 // @match        https://worldsweeper.site/*
@@ -15,7 +15,6 @@
 /*关注Neurosama谢谢喵，关注Vedal987谢谢喵，关注CerberVT谢谢喵*/
 /* eslint-env browser, es2022 */
 /* eslint-disable no-bitwise */
-
 (function () {
     'use strict';
 
@@ -38,26 +37,26 @@
     });
 
     const BIOME_DATA = Object.freeze({
-        [BIOMES.OCEAN]: { ventMult: 0, shrineMult: 0, blightMult: 0, chestMult: 0 },
-        [BIOMES.COAST]: { ventMult: 0.8, shrineMult: 1, blightMult: 0.4, chestMult: 1 },
-        [BIOMES.FOREST]: { ventMult: 1, shrineMult: 1, blightMult: 1.8, chestMult: 1.2 },
-        [BIOMES.GRASSLAND]: { ventMult: 1, shrineMult: 1, blightMult: 1, chestMult: 1 },
-        [BIOMES.DESERT]: { ventMult: 2, shrineMult: 1, blightMult: 0.3, chestMult: 1 },
-        [BIOMES.MOUNTAIN]: { ventMult: 1, shrineMult: 2, blightMult: 1, chestMult: 1 },
-        [BIOMES.TUNDRA]: { ventMult: 0.5, shrineMult: 1, blightMult: 0.8, chestMult: 1 },
-        [BIOMES.TROPICAL]: { ventMult: 1.4, shrineMult: 1, blightMult: 1.6, chestMult: 1 },
-        [BIOMES.ROCKY]: { ventMult: 1.6, shrineMult: 1, blightMult: 1.3, chestMult: 1 },
-        [BIOMES.VOLCANIC]: { ventMult: 2.4, shrineMult: 1, blightMult: 1.5, chestMult: 1 },
-        [BIOMES.ICE]: { ventMult: 0.2, shrineMult: 1.8, blightMult: 1.1, chestMult: 1 },
-        [BIOMES.URBAN]: { ventMult: 1, shrineMult: 1.5, blightMult: 0.5, chestMult: 1.6 },
+        [BIOMES.OCEAN]: { ventMult: 0, shrineMult: 0, blightMult: 0, chestMult: 0, ventDamage: 12 },
+        [BIOMES.COAST]: { ventMult: 0.8, shrineMult: 1, blightMult: 0.4, chestMult: 1, ventDamage: 8 },
+        [BIOMES.FOREST]: { ventMult: 1, shrineMult: 1, blightMult: 1.8, chestMult: 1.2, ventDamage: 12 },
+        [BIOMES.GRASSLAND]: { ventMult: 1, shrineMult: 1, blightMult: 1, chestMult: 1, ventDamage: 12 },
+        [BIOMES.DESERT]: { ventMult: 2, shrineMult: 1, blightMult: 0.3, chestMult: 1, ventDamage: 16 },
+        [BIOMES.MOUNTAIN]: { ventMult: 1, shrineMult: 2, blightMult: 1, chestMult: 1, ventDamage: 14 },
+        [BIOMES.TUNDRA]: { ventMult: 0.5, shrineMult: 1, blightMult: 0.8, chestMult: 1, ventDamage: 12 },
+        [BIOMES.TROPICAL]: { ventMult: 1.4, shrineMult: 1, blightMult: 1.6, chestMult: 1, ventDamage: 12 },
+        [BIOMES.ROCKY]: { ventMult: 1.6, shrineMult: 1, blightMult: 1.3, chestMult: 1, ventDamage: 12 },
+        [BIOMES.VOLCANIC]: { ventMult: 2.4, shrineMult: 1, blightMult: 1.5, chestMult: 1, ventDamage: 18 },
+        [BIOMES.ICE]: { ventMult: 0.2, shrineMult: 1.8, blightMult: 1.1, chestMult: 1, ventDamage: 12 },
+        [BIOMES.URBAN]: { ventMult: 1, shrineMult: 1.5, blightMult: 0.5, chestMult: 1.6, ventDamage: 12 },
     });
 
     const CONFIG = Object.freeze({
-        TICK_INTERVAL_MS: 50,
+        TICK_INTERVAL_MS: 20,          // 调度周期 (20ms 高频)
+        MAX_DIGS_PER_TICK: 4,          // 单帧连发数
         UI_THROTTLE_MS: 200,
         READY_POLL_INTERVAL_MS: 400,
-        DEFAULT_DIG_ZOOM: 16.0,
-        MAX_RANDOM_SEARCH_ATTEMPTS: 50000,
+        SAFE_HP_RATIO_FOR_VENT: 0.60,
         BASE_RATES: {
             vent: 0.0015,
             shrine: 0.0005,
@@ -70,14 +69,11 @@
             REVEALED: 2,
             EXPLODED: 3,
         },
-        PRIORITY: {
-            INTERACTABLE: 4,
-            CHEST: 3,
-            GOLD_VENT: 2,
-            SHRINE_BLIGHT: 1,
-            NORMAL: 0,
-        },
-        MODAL_KEYWORDS: ['choose', 'take', 'select', '确认', '选择', 'claim', 'pay', 'open', 'vent', 'seal', 'bargain'],
+        MODAL_KEYWORDS: [
+            'choose', 'take', 'select', '确认', '选择',
+            'claim', 'pay', 'open', 'vent', 'seal', 'bargain',
+            'offer', 'loot', 'keep playing', 'walk away', 'leave',
+        ],
         UI: {
             THEME_COLOR: '#7ec8dc',
             STOP_COLOR: '#ff7b72',
@@ -87,7 +83,40 @@
     });
 
     // =========================================================================
-    // 2. 逆向推演与全知预测引擎 (Oracle Engine)
+    // 2. 高性能 O(1) 快速队列
+    // =========================================================================
+    class FastPointerQueue {
+        constructor() {
+            this.items = [];
+            this.head = 0;
+        }
+
+        push(item) {
+            this.items.push(item);
+        }
+
+        shift() {
+            if (this.head >= this.items.length) return null;
+            const item = this.items[this.head++];
+            if (this.head > 4000 && this.head * 2 >= this.items.length) {
+                this.items = this.items.slice(this.head);
+                this.head = 0;
+            }
+            return item;
+        }
+
+        get length() {
+            return this.items.length - this.head;
+        }
+
+        clear() {
+            this.items.length = 0;
+            this.head = 0;
+        }
+    }
+
+    // =========================================================================
+    // 3. 逆向推演与全知预测引擎 (Oracle Engine)
     // =========================================================================
     class FullOracleEngine {
         static hashU32(e) {
@@ -120,12 +149,14 @@
         }
 
         static isLand(world, x, y) {
+            if (!world || !world.land) return false;
             if (x < 0 || y < 0 || x >= world.cols || y >= world.rows) return false;
             const idx = y * world.cols + x;
             return (world.land[idx >>> 3] & (1 << (idx & 7))) !== 0;
         }
 
         static getTileState(world, x, y) {
+            if (!world || !world.state) return 0;
             const idx = y * world.cols + x;
             return (world.state[idx >>> 2] >> ((idx & 3) << 1)) & 3;
         }
@@ -139,6 +170,24 @@
             if (!this.isLand(world, x, y)) return false;
             if (this.isStartZone(world, x, y)) return false;
             return this.hashMine(world.seed, x, y) < world.densityU32;
+        }
+
+        static countAdjacentMines(world, x, y) {
+            let count = 0;
+            const cols = world.cols;
+            const rows = world.rows;
+
+            for (let dy = -1; dy <= 1; dy++) {
+                const ny = y + dy;
+                if (ny < 0 || ny >= rows) continue;
+                for (let dx = -1; dx <= 1; dx++) {
+                    if (dx === 0 && dy === 0) continue;
+                    const nx = x + dx;
+                    if (nx < 0 || nx >= cols) continue;
+                    if (this.isMine(world, nx, ny)) count++;
+                }
+            }
+            return count;
         }
 
         static resolveBiome(world, x, y) {
@@ -176,23 +225,23 @@
             return null;
         }
 
-        static isInteractable(world, x, y) {
+        static isPendingChest(world, x, y) {
             if (this.getTileState(world, x, y) !== CONFIG.TILE_STATE.REVEALED) return false;
             const idx = y * world.cols + x;
-            const poi = this.predictPoi(world, x, y);
-            if (!poi) return false;
-            return poi === 'treasure' ? !world.openedChests.has(idx) : !world.resolvedHazards.has(idx);
+            return this.predictPoi(world, x, y) === 'treasure' && !world.openedChests.has(idx);
+        }
+
+        static isPendingVent(world, x, y, isHealthSafe) {
+            if (!isHealthSafe || this.getTileState(world, x, y) !== CONFIG.TILE_STATE.REVEALED) return false;
+            const idx = y * world.cols + x;
+            return this.predictPoi(world, x, y) === 'vent' && !world.resolvedHazards.has(idx);
         }
     }
 
     // =========================================================================
-    // 3. React Fiber 全自动捕获与状态适配器 (Auto Fiber Extractor)
+    // 4. React Fiber 状态提取与安全弹窗交互
     // =========================================================================
     class GameStateAdapter {
-        /**
-         * 通过 Canvas 向上回溯 React 19 Fiber 树，自动提取游戏内部状态
-         * @returns {boolean}
-         */
         static autoCaptureFiberState() {
             const canvas = document.querySelector('canvas') || document.getElementById('root');
             if (!canvas) return false;
@@ -206,28 +255,29 @@
             let world = null;
             let session = null;
             let meta = null;
-            let view = null;
+            let liveViewRef = null;
             const callbacks = [];
 
             while (curr) {
                 let hook = curr.memoizedState;
                 while (hook) {
                     const val = hook.memoizedState;
-                    const candidates = [val, val?.current, Array.isArray(val) ? val[0] : null];
 
-                    for (const item of candidates) {
-                        if (!item || typeof item !== 'object') continue;
+                    if (val && typeof val === 'object' && val.current) {
+                        const target = val.current;
+                        if (target.cols !== undefined && target.rows !== undefined && target.land && target.state) {
+                            world = target;
+                        } else if (target.player && target.status !== undefined) {
+                            session = target;
+                        } else if (target.zoom !== undefined && target.x !== undefined && target.y !== undefined) {
+                            liveViewRef = target;
+                        }
+                    }
 
-                        if (item.cols !== undefined && item.rows !== undefined && item.land && item.state) {
-                            world = item;
-                        } else if (item.player && item.status !== undefined) {
-                            session = item;
-                        } else if (item.currentHealth !== undefined || (item.hp !== undefined && item.maxHp !== undefined)) {
-                            session = item;
-                        } else if (item.upgradeLevels !== undefined && item.gold !== undefined) {
-                            meta = item;
-                        } else if (item.zoom !== undefined && item.x !== undefined && item.y !== undefined) {
-                            view = item;
+                    if (val && typeof val === 'object') {
+                        const stateObj = Array.isArray(val) ? val[0] : val;
+                        if (stateObj && stateObj.upgradeLevels !== undefined && stateObj.gold !== undefined) {
+                            meta = stateObj;
                         }
                     }
 
@@ -237,21 +287,19 @@
                     hook = hook.next;
                 }
 
-                if (world && view) break;
+                if (world && liveViewRef) break;
                 curr = curr.return;
             }
 
-            if (world && view) {
-                unsafeWindow.__GAME = { world, session, meta, view, callbacks };
+            if (world && liveViewRef) {
+                unsafeWindow.__GAME = { world, session, meta, view: liveViewRef, callbacks };
                 return true;
             }
             return false;
         }
 
         static getGameInstance() {
-            if (!unsafeWindow.__GAME || !unsafeWindow.__GAME.world) {
-                this.autoCaptureFiberState();
-            }
+            this.autoCaptureFiberState();
             return unsafeWindow.__GAME || null;
         }
 
@@ -261,7 +309,7 @@
         }
 
         static resolveHealth(session) {
-            if (!session) return { hp: 100, maxHp: 100, isLoaded: false };
+            if (!session) return { hp: 100, maxHp: 100, isLoaded: false, isSafe: true };
             let cur;
             let max;
 
@@ -278,156 +326,302 @@
             max = Number(max);
 
             if (Number.isNaN(cur) || Number.isNaN(max) || max <= 0) {
-                return { hp: 100, maxHp: 100, isLoaded: false };
+                return { hp: 100, maxHp: 100, isLoaded: false, isSafe: true };
             }
-            return { hp: Math.ceil(cur), maxHp: Math.ceil(max), isLoaded: true };
+
+            const hp = Math.ceil(cur);
+            const maxHp = Math.ceil(max);
+            const isSafe = (hp / maxHp) >= CONFIG.SAFE_HP_RATIO_FOR_VENT && hp > 35;
+
+            return { hp, maxHp, isLoaded: true, isSafe };
+        }
+
+        static triggerButtonClick(btn) {
+            if (!btn) return;
+
+            try {
+                const reactPropsKey = Object.keys(btn).find((k) => k.startsWith('__reactProps'));
+                if (reactPropsKey && typeof btn[reactPropsKey]?.onClick === 'function') {
+                    btn[reactPropsKey].onClick({
+                        preventDefault() {},
+                        stopPropagation() {},
+                        target: btn,
+                        currentTarget: btn,
+                    });
+                }
+            } catch (e) {
+                // 忽略组件状态差异
+            }
+
+            try {
+                const eventInit = { bubbles: true, cancelable: true, buttons: 1 };
+                btn.dispatchEvent(new PointerEvent('pointerdown', eventInit));
+                btn.dispatchEvent(new MouseEvent('mousedown', eventInit));
+                btn.dispatchEvent(new PointerEvent('pointerup', { ...eventInit, buttons: 0 }));
+                btn.dispatchEvent(new MouseEvent('mouseup', { ...eventInit, buttons: 0 }));
+                btn.click();
+            } catch (e) {
+                btn.click();
+            }
         }
 
         static handleModals(autoPick, onAction) {
-            const buttons = document.querySelectorAll('button:not([disabled])');
-            for (const btn of buttons) {
-                const text = btn.textContent.trim().toLowerCase();
-                const matched = CONFIG.MODAL_KEYWORDS.some((kw) => text.includes(kw));
-                if (matched && btn.offsetParent !== null && !btn.id.includes('ai-btn')) {
-                    if (autoPick) {
-                        btn.click();
-                        if (typeof onAction === 'function') {
-                            onAction(btn.textContent.trim());
-                        }
-                        return false;
+            const session = unsafeWindow.__GAME?.session;
+            const hasPendingModalState = Boolean(
+                session?.pendingChest ||
+                session?.pendingReward ||
+                session?.pendingShrine ||
+                session?.pendingGeoVictories?.length
+            );
+
+            const buttons = Array.from(document.querySelectorAll('button:not([disabled])'));
+            let candidateBtn = null;
+
+            // 1. 神殿最高优先级：强制点击 "Walk away" 离开避伤
+            if (session?.pendingShrine) {
+                for (const btn of buttons) {
+                    if (btn.id?.includes('ai-btn')) continue;
+                    const text = (btn.textContent || '').trim().toLowerCase();
+                    const ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
+                    const combined = `${text} ${ariaLabel}`;
+                    if (combined.includes('walk') || combined.includes('leave') || combined.includes('离开') || combined.includes('走开')) {
+                        candidateBtn = btn;
+                        break;
                     }
-                    return true;
                 }
             }
-            return false;
+
+            // 2. 其它弹窗（宝箱、升级、通关）
+            if (!candidateBtn) {
+                for (const btn of buttons) {
+                    if (btn.id?.includes('ai-btn')) continue;
+
+                    const isVisible = btn.offsetWidth > 0 || btn.offsetHeight > 0 || btn.getClientRects().length > 0;
+                    if (!isVisible) continue;
+
+                    const text = (btn.textContent || '').trim().toLowerCase();
+                    const ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
+                    const combined = `${text} ${ariaLabel}`;
+
+                    const isKeywordMatch = CONFIG.MODAL_KEYWORDS.some((kw) => combined.includes(kw));
+                    const isInsideModal = Boolean(btn.closest('div[class*="z-"]') || btn.closest('.hud-frame'));
+
+                    if (isKeywordMatch || (hasPendingModalState && isInsideModal)) {
+                        candidateBtn = btn;
+                        break;
+                    }
+                }
+            }
+
+            if (candidateBtn) {
+                if (autoPick || session?.pendingShrine) {
+                    this.triggerButtonClick(candidateBtn);
+                    if (typeof onAction === 'function') {
+                        const actionName = candidateBtn.textContent.trim() || candidateBtn.getAttribute('aria-label') || 'Action';
+                        onAction(actionName);
+                    }
+                    return false;
+                }
+                return true;
+            }
+
+            return hasPendingModalState;
         }
     }
 
     // =========================================================================
-    // 4. 智能多优先级寻路器
+    // 5. 螺旋扩散与全图混合寻路器 (Turbo Spiral & Frontier Hunter)
     // =========================================================================
-    class SmartPriorityPathfinder {
+    class TurboSpiralPathfinder {
         constructor(world) {
             this.world = world;
-            this.queues = {
-                [CONFIG.PRIORITY.INTERACTABLE]: [],
-                [CONFIG.PRIORITY.CHEST]: [],
-                [CONFIG.PRIORITY.GOLD_VENT]: [],
-                [CONFIG.PRIORITY.SHRINE_BLIGHT]: [],
-                [CONFIG.PRIORITY.NORMAL]: [],
-            };
-            this.visited = new Set();
+            this.cols = world.cols;
+            this.rows = world.rows;
+
+            this.visitedBits = new Uint8Array(Math.ceil((this.cols * this.rows) / 8));
+            this.interactQueue = new FastPointerQueue(); // [P0] 宝箱/喷口交互队列
+            this.zeroQueue = new FastPointerQueue();     // [P1] 0 空白引爆格队列
+            this.frontierQueue = new FastPointerQueue(); // [P2] 数字边界推图队列
+
+            this.spiralRadius = 0;
+            this.spiralMax = Math.max(this.cols, this.rows);
+            this.initSeedPoint();
         }
 
-        addNeighbors(x, y) {
+        initSeedPoint() {
+            const { safeX, safeY } = this.world;
+            if (safeX >= 0 && safeY >= 0) {
+                const idx = safeY * this.cols + safeX;
+                this.markVisited(idx);
+                this.addNeighbors(safeX, safeY, true);
+            }
+        }
+
+        updateWorld(world) {
+            if (this.world.seed !== world.seed || this.cols !== world.cols || this.rows !== world.rows) {
+                this.world = world;
+                this.cols = world.cols;
+                this.rows = world.rows;
+                this.visitedBits = new Uint8Array(Math.ceil((this.cols * this.rows) / 8));
+                this.interactQueue.clear();
+                this.zeroQueue.clear();
+                this.frontierQueue.clear();
+                this.spiralRadius = 0;
+                this.initSeedPoint();
+            } else {
+                this.world = world;
+            }
+        }
+
+        isVisited(idx) {
+            return (this.visitedBits[idx >>> 3] & (1 << (idx & 7))) !== 0;
+        }
+
+        markVisited(idx) {
+            this.visitedBits[idx >>> 3] |= (1 << (idx & 7));
+        }
+
+        addNeighbors(x, y, isHealthSafe) {
+            const cols = this.cols;
+            const rows = this.rows;
+
             for (let dy = -1; dy <= 1; dy++) {
+                const ny = y + dy;
+                if (ny < 0 || ny >= rows) continue;
+
                 for (let dx = -1; dx <= 1; dx++) {
                     if (dx === 0 && dy === 0) continue;
                     const nx = x + dx;
-                    const ny = y + dy;
-                    const key = `${nx},${ny}`;
+                    if (nx < 0 || nx >= cols) continue;
 
-                    if (!FullOracleEngine.isLand(this.world, nx, ny) || this.visited.has(key)) continue;
+                    const idx = ny * cols + nx;
+                    if (this.isVisited(idx)) continue;
+                    if (!FullOracleEngine.isLand(this.world, nx, ny)) continue;
                     if (FullOracleEngine.isMine(this.world, nx, ny)) continue;
 
                     const state = FullOracleEngine.getTileState(this.world, nx, ny);
 
-                    if (state === CONFIG.TILE_STATE.REVEALED && FullOracleEngine.isInteractable(this.world, nx, ny)) {
-                        this.visited.add(key);
-                        this.queues[CONFIG.PRIORITY.INTERACTABLE].push({ x: nx, y: ny });
+                    // 1. 待收取的宝箱/喷口
+                    if (FullOracleEngine.isPendingChest(this.world, nx, ny) || FullOracleEngine.isPendingVent(this.world, nx, ny, isHealthSafe)) {
+                        this.markVisited(idx);
+                        this.interactQueue.push({ x: nx, y: ny, idx });
                         continue;
                     }
 
+                    // 2. 未翻开地块
                     if (state === CONFIG.TILE_STATE.UNOPENED) {
-                        this.visited.add(key);
+                        this.markVisited(idx);
                         const poi = FullOracleEngine.predictPoi(this.world, nx, ny);
                         if (poi === 'treasure') {
-                            this.queues[CONFIG.PRIORITY.CHEST].push({ x: nx, y: ny });
-                        } else if (poi === 'vent') {
-                            this.queues[CONFIG.PRIORITY.GOLD_VENT].push({ x: nx, y: ny });
-                        } else if (poi === 'shrine' || poi === 'blight') {
-                            this.queues[CONFIG.PRIORITY.SHRINE_BLIGHT].push({ x: nx, y: ny });
+                            this.interactQueue.push({ x: nx, y: ny, idx });
                         } else {
-                            this.queues[CONFIG.PRIORITY.NORMAL].push({ x: nx, y: ny });
-                        }
-                    }
-                }
-            }
-        }
-
-        findGlobalSafeTile() {
-            const { cols, rows, safeX, safeY } = this.world;
-
-            if (safeX >= 0 && safeY >= 0) {
-                for (let r = 0; r < 80; r++) {
-                    for (let dy = -r; dy <= r; dy++) {
-                        for (let dx = -r; dx <= r; dx++) {
-                            const nx = safeX + dx;
-                            const ny = safeY + dy;
-                            const key = `${nx},${ny}`;
-                            if (
-                                FullOracleEngine.isLand(this.world, nx, ny) &&
-                                FullOracleEngine.getTileState(this.world, nx, ny) === CONFIG.TILE_STATE.UNOPENED &&
-                                !this.visited.has(key) &&
-                                !FullOracleEngine.isMine(this.world, nx, ny)
-                            ) {
-                                return { x: nx, y: ny };
+                            const adjMines = FullOracleEngine.countAdjacentMines(this.world, nx, ny);
+                            if (adjMines === 0) {
+                                this.zeroQueue.push({ x: nx, y: ny, idx });
+                            } else {
+                                this.frontierQueue.push({ x: nx, y: ny, idx });
                             }
                         }
                     }
                 }
             }
-
-            for (let i = 0; i < CONFIG.MAX_RANDOM_SEARCH_ATTEMPTS; i++) {
-                const rx = Math.floor(Math.random() * cols);
-                const ry = Math.floor(Math.random() * rows);
-                const key = `${rx},${ry}`;
-                if (
-                    FullOracleEngine.isLand(this.world, rx, ry) &&
-                    FullOracleEngine.getTileState(this.world, rx, ry) === CONFIG.TILE_STATE.UNOPENED &&
-                    !this.visited.has(key) &&
-                    !FullOracleEngine.isMine(this.world, rx, ry)
-                ) {
-                    return { x: rx, y: ry };
-                }
-            }
-            return null;
         }
 
-        getNextMove() {
-            const priorityOrder = [
-                CONFIG.PRIORITY.INTERACTABLE,
-                CONFIG.PRIORITY.CHEST,
-                CONFIG.PRIORITY.GOLD_VENT,
-                CONFIG.PRIORITY.SHRINE_BLIGHT,
-                CONFIG.PRIORITY.NORMAL,
-            ];
+        /**
+         * 🌟 以出生点为中心向外螺旋扫描陆地（避免进入北极海洋死循环）
+         */
+        findNextSpiralTile() {
+            const { cols, rows, safeX, safeY } = this.world;
+            const centerX = safeX >= 0 ? safeX : (cols >> 1);
+            const centerY = safeY >= 0 ? safeY : (rows >> 1);
 
-            for (const p of priorityOrder) {
-                const q = this.queues[p];
-                while (q.length > 0) {
-                    const target = q.shift();
-                    const state = FullOracleEngine.getTileState(this.world, target.x, target.y);
+            while (this.spiralRadius < this.spiralMax) {
+                const r = this.spiralRadius;
+                this.spiralRadius += 10; // 步长 10 快速外扩
 
-                    if (p === CONFIG.PRIORITY.INTERACTABLE) {
-                        if (FullOracleEngine.isInteractable(this.world, target.x, target.y)) return target;
-                    } else if (state === CONFIG.TILE_STATE.UNOPENED && !FullOracleEngine.isMine(this.world, target.x, target.y)) {
-                        return target;
+                for (let dy = -r; dy <= r; dy += 4) {
+                    const ny = centerY + dy;
+                    if (ny < 0 || ny >= rows) continue;
+
+                    for (let dx = -r; dx <= r; dx += 4) {
+                        const nx = centerX + dx;
+                        if (nx < 0 || nx >= cols) continue;
+
+                        const idx = ny * cols + nx;
+                        if (this.isVisited(idx)) continue;
+                        if (!FullOracleEngine.isLand(this.world, nx, ny)) continue;
+                        if (FullOracleEngine.isMine(this.world, nx, ny)) continue;
+
+                        const state = FullOracleEngine.getTileState(this.world, nx, ny);
+                        if (state === CONFIG.TILE_STATE.UNOPENED) {
+                            this.markVisited(idx);
+                            return { x: nx, y: ny, idx };
+                        }
                     }
                 }
             }
 
-            const fallback = this.findGlobalSafeTile();
-            if (fallback) {
-                this.visited.add(`${fallback.x},${fallback.y}`);
-                return fallback;
+            // 全图兜底蒙特卡洛扫描
+            for (let i = 0; i < CONFIG.MAX_RANDOM_SEARCH_ATTEMPTS; i++) {
+                const rx = Math.floor(Math.random() * cols);
+                const ry = Math.floor(Math.random() * rows);
+                const idx = ry * cols + rx;
+
+                if (
+                    !this.isVisited(idx) &&
+                    FullOracleEngine.isLand(this.world, rx, ry) &&
+                    FullOracleEngine.getTileState(this.world, rx, ry) === CONFIG.TILE_STATE.UNOPENED &&
+                    !FullOracleEngine.isMine(this.world, rx, ry)
+                ) {
+                    this.markVisited(idx);
+                    return { x: rx, y: ry, idx };
+                }
             }
+
             return null;
+        }
+
+        getNextMove(isHealthSafe) {
+            // 1. 优先处理宝箱/喷口
+            while (this.interactQueue.length > 0) {
+                const target = this.interactQueue.shift();
+                if (FullOracleEngine.isPendingChest(this.world, target.x, target.y)) return target;
+                if (FullOracleEngine.isPendingVent(this.world, target.x, target.y, isHealthSafe)) return target;
+                const state = FullOracleEngine.getTileState(this.world, target.x, target.y);
+                if (state === CONFIG.TILE_STATE.UNOPENED && !FullOracleEngine.isMine(this.world, target.x, target.y)) {
+                    return target;
+                }
+            }
+
+            // 2. 优先引爆 0 空白格（一击翻开大片区域）
+            while (this.zeroQueue.length > 0) {
+                const target = this.zeroQueue.shift();
+                const state = FullOracleEngine.getTileState(this.world, target.x, target.y);
+                if (state === CONFIG.TILE_STATE.UNOPENED && !FullOracleEngine.isMine(this.world, target.x, target.y)) {
+                    return target;
+                } else if (state === CONFIG.TILE_STATE.REVEALED) {
+                    this.addNeighbors(target.x, target.y, isHealthSafe);
+                }
+            }
+
+            // 3. 数字边界格推图
+            while (this.frontierQueue.length > 0) {
+                const target = this.frontierQueue.shift();
+                const state = FullOracleEngine.getTileState(this.world, target.x, target.y);
+                if (state === CONFIG.TILE_STATE.UNOPENED && !FullOracleEngine.isMine(this.world, target.x, target.y)) {
+                    return target;
+                } else if (state === CONFIG.TILE_STATE.REVEALED) {
+                    this.addNeighbors(target.x, target.y, isHealthSafe);
+                }
+            }
+
+            // 4. 螺旋外扩找新陆地
+            return this.findNextSpiralTile();
         }
     }
 
     // =========================================================================
-    // 5. 输入合成调度器
+    // 6. 输入合成调度器 (完全解离视口，精准命中目标中心)
     // =========================================================================
     class CanvasInputDispatcher {
         static dig(view, tileX, tileY) {
@@ -441,21 +635,17 @@
             if (!props?.onPointerDown || !props?.onPointerUp) return;
 
             const rect = canvas.getBoundingClientRect();
-            view.zoom = CONFIG.DEFAULT_DIG_ZOOM;
-            view.x = rect.width / 2 - (tileX + 0.5) * CONFIG.DEFAULT_DIG_ZOOM;
-            view.y = rect.height / 2 - (tileY + 0.5) * CONFIG.DEFAULT_DIG_ZOOM;
-
-            const cx = rect.left + rect.width / 2;
-            const cy = rect.top + rect.height / 2;
+            const targetClientX = rect.left + view.x + (tileX + 0.5) * view.zoom;
+            const targetClientY = rect.top + view.y + (tileY + 0.5) * view.zoom;
 
             const evt = {
                 button: 0,
                 buttons: 1,
                 pointerId: 1,
-                clientX: cx,
-                clientY: cy,
-                pageX: cx,
-                pageY: cy,
+                clientX: targetClientX,
+                clientY: targetClientY,
+                pageX: targetClientX,
+                pageY: targetClientY,
                 target: canvas,
                 currentTarget: canvas,
                 preventDefault() {},
@@ -472,7 +662,7 @@
     }
 
     // =========================================================================
-    // 6. UI 控制面板层
+    // 7. UI 控制面板层
     // =========================================================================
     class UIController {
         constructor({ onToggle, onAutoSkillChange }) {
@@ -494,7 +684,7 @@
             `;
 
             this.statusLabel = document.createElement('div');
-            this.statusLabel.textContent = 'Status: Waiting...';
+            this.statusLabel.textContent = 'Status: Waiting for engine...';
             this.statusLabel.style.cssText = `font-size: 12px; margin-bottom: 8px; text-align: center; color: ${CONFIG.UI.THEME_COLOR};`;
 
             this.actionButton = document.createElement('button');
@@ -562,7 +752,7 @@
     }
 
     // =========================================================================
-    // 7. 主控应用调度器
+    // 8. 主控应用调度器 (WorldSweeperBot)
     // =========================================================================
     class WorldSweeperBot {
         constructor() {
@@ -599,7 +789,7 @@
                 if (GameStateAdapter.isReady()) {
                     clearInterval(timer);
                     this.ui.setReady();
-                    console.info('[WorldSweeper] ✅ React Fiber 已自动挂载就绪！(按 ESC/空格 随时启停)');
+                    console.info('[WorldSweeper] ✅ 螺旋极速扫雷引擎已就绪！');
                 }
             }, CONFIG.READY_POLL_INTERVAL_MS);
         }
@@ -619,10 +809,10 @@
 
             this.isRunning = true;
             this.ui.setRunningState(true);
-            this.pathfinder = new SmartPriorityPathfinder(g.world);
+            this.pathfinder = new TurboSpiralPathfinder(g.world);
 
             if (this.tickerId) clearInterval(this.tickerId);
-            this.tickerId = setInterval(() => this.tick(g), CONFIG.TICK_INTERVAL_MS);
+            this.tickerId = setInterval(() => this.tick(), CONFIG.TICK_INTERVAL_MS);
         }
 
         stop() {
@@ -635,21 +825,25 @@
             this.ui.setStatus('Stopped', true);
         }
 
-        tick(game) {
+        tick() {
             if (!this.isRunning) return;
 
-            const { world, session, view } = game;
+            const game = GameStateAdapter.getGameInstance();
+            if (!game || !game.world || !game.view) return;
 
-            // 1. 弹窗交互检测
+            const { world, session, view } = game;
+            this.pathfinder.updateWorld(world);
+
+            // 1. 弹窗与神殿自动处理 (神殿秒退避伤)
             const hasModal = GameStateAdapter.handleModals(this.autoPickSkills, (name) => {
-                this.ui.setStatus(`🎁 自动交互: ${name}`, true);
+                this.ui.setStatus(`🎁 自动处理: ${name}`, true);
             });
             if (hasModal) {
                 this.ui.setStatus('⏸️ 发现奖励/升级！', true);
                 return;
             }
 
-            // 2. 生命值与结算状态安全检测
+            // 2. 生命值与存活检测
             const health = GameStateAdapter.resolveHealth(session);
             const status = session.status;
             this.ui.setStatus(`Revealed: ${world.revealedCount}`);
@@ -666,21 +860,35 @@
                 return;
             }
 
-            // 3. 优先级寻路与执行
-            const target = this.pathfinder.getNextMove();
-            if (!target) {
-                this.ui.setStatus('🎉 全图安全区清理完成！', true);
-                this.stop();
+            // 🌟 处于洪水动画期间，显示状态并把控制权让给游戏渲染
+            if (world.flood && world.flood.head < world.flood.tail) {
+                this.ui.setStatus(`🌊 连锁轰炸中: ${world.revealedCount}`);
                 return;
             }
 
-            CanvasInputDispatcher.dig(view, target.x, target.y);
-            this.pathfinder.addNeighbors(target.x, target.y);
+            // 3. 螺旋高频连发
+            for (let i = 0; i < CONFIG.MAX_DIGS_PER_TICK; i++) {
+                if (!this.isRunning) break;
+
+                const target = this.pathfinder.getNextMove(health.isSafe);
+                if (!target) {
+                    this.ui.setStatus('🎉 全球安全区清理完成！', true);
+                    this.stop();
+                    return;
+                }
+
+                CanvasInputDispatcher.dig(view, target.x, target.y);
+                this.pathfinder.addNeighbors(target.x, target.y, health.isSafe);
+
+                if (world.flood && world.flood.head < world.flood.tail) {
+                    break;
+                }
+            }
         }
     }
 
     // =========================================================================
-    // 8. 脚本挂载入口
+    // 9. 脚本挂载入口
     // =========================================================================
     const app = new WorldSweeperBot();
     if (document.readyState === 'loading') {

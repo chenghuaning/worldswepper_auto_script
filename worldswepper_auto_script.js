@@ -1,25 +1,25 @@
 // ==UserScript==
-// @name         WorldSweeper (Pixel-Perfect Oracle & Treasure Hunter - Turbo Spiral)
+// @name         WorldSweeper (Pixel-Perfect Oracle & Treasure Hunter - WebGPU GPGPU v45)
 // @namespace    https://github.com/chenghuaning/worldswepper_auto_script
-// @version      33.0.0
-// @description  全知透视扫雷【螺旋轰炸修正版】：修复开局扫海洋秒停问题、以出生点为中心高速引爆、神殿自动秒退、视窗解离零抖动。
+// @version      45.0.0
+// @description  全知透视扫雷
 // @author       WorldSweeper Engineering Team
 // @license      MIT
 // @match        https://worldsweeper.site/*
 // @grant        unsafeWindow
 // @run-at       document-start
 // ==/UserScript==
-
 /*create by deepseek chat and gemini-3.7-flash*/
 /*想起来就更新（*/
 /*关注Neurosama谢谢喵，关注Vedal987谢谢喵，关注CerberVT谢谢喵*/
 /* eslint-env browser, es2022 */
 /* eslint-disable no-bitwise */
+
 (function () {
     'use strict';
 
     // =========================================================================
-    // 1. 地形与生物群系常量配置 (Biome & Rate Tables)
+    // 1. 地形与生物群系常量配置
     // =========================================================================
     const BIOMES = Object.freeze({
         OCEAN: 0,
@@ -52,11 +52,9 @@
     });
 
     const CONFIG = Object.freeze({
-        TICK_INTERVAL_MS: 20,          // 调度周期 (20ms 高频)
-        MAX_DIGS_PER_TICK: 4,          // 单帧连发数
-        UI_THROTTLE_MS: 200,
-        READY_POLL_INTERVAL_MS: 400,
-        SAFE_HP_RATIO_FOR_VENT: 0.60,
+        GPU_BATCH_SIZE: 150000,        // 🌟 单次 GPU 并发调度的地块规模 (15万格/批次)
+        UI_THROTTLE_MS: 150,           // UI 渲染节流
+        SPEED_SAMPLE_INTERVAL_MS: 400, // 速率采样周期
         BASE_RATES: {
             vent: 0.0015,
             shrine: 0.0005,
@@ -77,46 +75,380 @@
         UI: {
             THEME_COLOR: '#7ec8dc',
             STOP_COLOR: '#ff7b72',
+            SPEED_COLOR: '#e0c060',
             BG_COLOR: 'rgba(0, 0, 0, 0.92)',
             TEXT_COLOR: '#f4f0e4',
         },
     });
 
     // =========================================================================
-    // 2. 高性能 O(1) 快速队列
+    // 2. WebGPU 计算着色器源码 (WGSL - GPU 硬件底层并发指令)
     // =========================================================================
-    class FastPointerQueue {
-        constructor() {
-            this.items = [];
-            this.head = 0;
+    const WGSL_SHADER_CODE = /* wgsl */`
+    struct Params {
+        cols: u32,
+        rows: u32,
+        seed: u32,
+        densityU32: u32,
+        chestSalt: u32,
+        startIndex: u32,
+        batchCount: u32,
+        safeX: i32,
+        safeY: i32,
+    };
+
+    @group(0) @binding(0) var<storage, read> land: array<u32>;
+    @group(0) @binding(1) var<storage, read_write> state: array<atomic<u32>>;
+    @group(0) @binding(2) var<uniform> params: Params;
+    @group(0) @binding(3) var<storage, read_write> outStats: array<atomic<u32>>;
+    // outStats[0]: revealedCount, outStats[1]: chestFoundFlag, outStats[2]: chestX, outStats[3]: chestY
+
+    fn hashU32(val: u32) -> u32 {
+        var t = val;
+        t = (t ^ (t >> 16u)) * 2146121005u;
+        t = (t ^ (t >> 15u)) * 2221713035u;
+        return t ^ (t >> 16u);
+    }
+
+    @compute @workgroup_size(256)
+    fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+        let localIdx = global_id.x;
+        if (localIdx >= params.batchCount) { return; }
+
+        let idx = params.startIndex + localIdx;
+        let totalTiles = params.cols * params.rows;
+        if (idx >= totalTiles) { return; }
+
+        // 1. 检查是否为陆地 (land array 以 32-bit u32 存储)
+        let landU32Idx = idx >> 5u;
+        let bitPos = idx & 31u;
+        if ((land[landU32Idx] & (1u << bitPos)) == 0u) {
+            return; // 海洋，跳过
         }
 
-        push(item) {
-            this.items.push(item);
+        // 2. 检查是否未翻开 (state 每格 2 bits，每 u32 存 16 格)
+        let stateU32Idx = idx >> 4u;
+        let shift = (idx & 15u) * 2u;
+        let curState = (atomicLoad(&state[stateU32Idx]) >> shift) & 3u;
+        if (curState != 0u) {
+            return; // 已翻开或已插旗，跳过
         }
 
-        shift() {
-            if (this.head >= this.items.length) return null;
-            const item = this.items[this.head++];
-            if (this.head > 4000 && this.head * 2 >= this.items.length) {
-                this.items = this.items.slice(this.head);
-                this.head = 0;
+        let x = idx % params.cols;
+        let y = idx / params.cols;
+
+        // 3. 出生点保护区
+        if (params.safeX >= 0) {
+            let dx = abs(i32(x) - params.safeX);
+            let dy = abs(i32(y) - params.safeY);
+            if (max(dx, dy) <= 1) {
+                return;
             }
-            return item;
         }
 
-        get length() {
-            return this.items.length - this.head;
+        // 4. 地雷哈希推演
+        let hx = hashU32(x + 1u);
+        let hy = hashU32((y + 1u) * 374761393u);
+        if (hashU32(hx ^ hy ^ params.seed) < params.densityU32) {
+            return; // 是雷，绝对避开
         }
 
-        clear() {
-            this.items.length = 0;
-            this.head = 0;
+        // 5. 宝箱判定
+        let htx = hashU32(x + 17u);
+        let hty = hashU32((y + 31u) * 668265263u);
+        if (hashU32(htx ^ hty ^ params.chestSalt) < 25769803u) {
+            atomicStore(&outStats[1], 1u);
+            atomicStore(&outStats[2], x);
+            atomicStore(&outStats[3], y);
+            return;
+        }
+
+        // 6. 原子置位写入 state 为 REVEALED (2)
+        let revealMask = 2u << shift;
+        atomicOr(&state[stateU32Idx], revealMask);
+        atomicAdd(&outStats[0], 1u);
+    }
+    `;
+
+    // =========================================================================
+    // 3. WebGPU 硬件加速控制器 (WebGPU Compute Engine)
+    // =========================================================================
+    class WebGPUSweeperEngine {
+        constructor(world) {
+            this.world = world;
+            this.cols = world.cols;
+            this.rows = world.rows;
+            this.totalTiles = this.cols * this.rows;
+            this.seed = world.seed;
+            this.cursorIndex = 0;
+            this.chestSalt = world.seed ^ 2779096485;
+
+            this.isGpuReady = false;
+            this.device = null;
+            this.pipeline = null;
+            this.landBuffer = null;
+            this.stateBuffer = null;
+            this.paramsBuffer = null;
+            this.statsBuffer = null;
+            this.readbackStatsBuffer = null;
+            this.bindGroup = null;
+
+            // CPU 预查表备用 (降级通道)
+            this.hxTable = new Uint32Array(this.cols + 2);
+            this.htxTable = new Uint32Array(this.cols + 20);
+            for (let x = 0; x < this.cols; x++) {
+                this.hxTable[x] = FullOracleEngine.hashU32(x + 1);
+                this.htxTable[x] = FullOracleEngine.hashU32(x + 17);
+            }
+
+            this.initWebGPU();
+        }
+
+        async initWebGPU() {
+            if (!navigator.gpu) {
+                console.warn('[WorldSweeper] 浏览器未开启 WebGPU，已自动切换至 CPU 超频流水线模式');
+                return;
+            }
+
+            try {
+                const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+                if (!adapter) return;
+
+                this.device = await adapter.requestDevice();
+                const shaderModule = this.device.createShaderModule({ code: WGSL_SHADER_CODE });
+
+                this.pipeline = this.device.createComputePipeline({
+                    layout: 'auto',
+                    compute: { module: shaderModule, entryPoint: 'main' },
+                });
+
+                // 创建显存缓冲区 (VRAM Buffers)
+                const landU32 = new Uint32Array(this.world.land.buffer, this.world.land.byteOffset, this.world.land.byteLength >>> 2);
+                this.landBuffer = this.device.createBuffer({
+                    size: landU32.byteLength,
+                    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+                });
+                this.device.queue.writeBuffer(this.landBuffer, 0, landU32);
+
+                this.stateBuffer = this.device.createBuffer({
+                    size: this.world.state.byteLength,
+                    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+                });
+                this.device.queue.writeBuffer(this.stateBuffer, 0, this.world.state);
+
+                this.paramsBuffer = this.device.createBuffer({
+                    size: 36, // 9 * 4 bytes
+                    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+                });
+
+                this.statsBuffer = this.device.createBuffer({
+                    size: 16, // 4 * 4 bytes
+                    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+                });
+
+                this.readbackStatsBuffer = this.device.createBuffer({
+                    size: 16,
+                    usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+                });
+
+                this.bindGroup = this.device.createBindGroup({
+                    layout: this.pipeline.getBindGroupLayout(0),
+                    entries: [
+                        { binding: 0, resource: { buffer: this.landBuffer } },
+                        { binding: 1, resource: { buffer: this.stateBuffer } },
+                        { binding: 2, resource: { buffer: this.paramsBuffer } },
+                        { binding: 3, resource: { buffer: this.statsBuffer } },
+                    ],
+                });
+
+                this.isGpuReady = true;
+                console.info('[WorldSweeper] 🎮 AMD/Intel 显卡 WebGPU 计算着色器已成功挂载！');
+            } catch (err) {
+                console.warn('[WorldSweeper] WebGPU 初始化异常，切回 CPU 流水线:', err);
+                this.isGpuReady = false;
+            }
+        }
+
+        updateWorld(world) {
+            if (this.world.seed !== world.seed || this.cols !== world.cols || this.rows !== world.rows) {
+                this.world = world;
+                this.cols = world.cols;
+                this.rows = world.rows;
+                this.totalTiles = this.cols * this.rows;
+                this.cursorIndex = 0;
+                this.chestSalt = world.seed ^ 2779096485;
+                if (this.isGpuReady) this.initWebGPU();
+            } else {
+                this.world = world;
+            }
+        }
+
+        /**
+         * 🌟 显卡 GPU 并发计算批次
+         */
+        async sweepGpuBatch(session) {
+            if (!this.isGpuReady || !this.device) {
+                return this.sweepCpuFallback(session);
+            }
+
+            const batchSize = CONFIG.GPU_BATCH_SIZE;
+            const startIndex = this.cursorIndex;
+
+            // 1. 写入 Uniform 参数到显存
+            const paramsData = new Uint32Array([
+                this.cols,
+                this.rows,
+                this.world.seed,
+                this.world.densityU32,
+                this.chestSalt,
+                startIndex,
+                batchSize,
+                this.world.safeX,
+                this.world.safeY,
+            ]);
+            this.device.queue.writeBuffer(this.paramsBuffer, 0, paramsData);
+            this.device.queue.writeBuffer(this.statsBuffer, 0, new Uint32Array(4)); // 重置计数器
+
+            // 2. 调度计算通道 (Dispatch Compute Shader)
+            const commandEncoder = this.device.createCommandEncoder();
+            const passEncoder = commandEncoder.beginComputePass();
+            passEncoder.setPipeline(this.pipeline);
+            passEncoder.setBindGroup(0, this.bindGroup);
+            passEncoder.dispatchWorkgroups(Math.ceil(batchSize / 256));
+            passEncoder.end();
+
+            // 复制统计结果到可读缓冲区
+            commandEncoder.copyBufferToBuffer(this.statsBuffer, 0, this.readbackStatsBuffer, 0, 16);
+            this.device.queue.submit([commandEncoder.finish()]);
+
+            // 3. 回读 GPU 统计结果
+            await this.readbackStatsBuffer.mapAsync(GPUMapMode.READ);
+            const stats = new Uint32Array(this.readbackStatsBuffer.getMappedRange().slice(0));
+            this.readbackStatsBuffer.unmap();
+
+            const revealedInBatch = stats[0];
+            const chestFound = stats[1] === 1;
+            const chestX = stats[2];
+            const chestY = stats[3];
+
+            // 更新状态
+            this.world.revealedCount += revealedInBatch;
+            this.world.remainingSafe -= revealedInBatch;
+            if (session?.progress) {
+                session.progress.tilesRevealed += revealedInBatch;
+                session.progress.safeTilesRevealed += revealedInBatch;
+            }
+            if (session?.player) {
+                const xpMult = (session.player.finalStats?.xpMultiplier ?? 1) * 2;
+                session.player.actionXp += revealedInBatch * xpMult;
+                session.player.xp += revealedInBatch * xpMult;
+            }
+
+            this.cursorIndex += batchSize;
+            if (this.cursorIndex >= this.totalTiles) {
+                this.cursorIndex = 0;
+            }
+
+            if (chestFound && !this.world.openedChests.has(chestY * this.cols + chestX)) {
+                return { encounterChest: { x: chestX, y: chestY } };
+            }
+
+            return null;
+        }
+
+        /**
+         * CPU 降级超频备用通道
+         */
+        sweepCpuFallback(session) {
+            const world = this.world;
+            const land = world.land;
+            const state = world.state;
+            const seed = this.seed;
+            const densityU32 = world.densityU32;
+            const cols = this.cols;
+            const total = this.totalTiles;
+            const chestSalt = this.chestSalt;
+            const hxTable = this.hxTable;
+            const htxTable = this.htxTable;
+
+            const player = session?.player;
+            const xpAdd = (player?.finalStats?.xpMultiplier ?? 1) * 2;
+            let batchCount = 0;
+            const maxTiles = 30000;
+
+            const fastHash = (e) => {
+                let t = e | 0;
+                t = Math.imul(t ^ (t >>> 16), 2146121005);
+                t = Math.imul(t ^ (t >>> 15), 2221713035);
+                return ((t ^ (t >>> 16)) >>> 0);
+            };
+
+            let idx = this.cursorIndex;
+            let x = idx % cols;
+            let y = (idx / cols) | 0;
+            let cachedY = -1;
+            let currHy = 0;
+            let currHty = 0;
+
+            while (batchCount < maxTiles) {
+                if (y !== cachedY) {
+                    cachedY = y;
+                    currHy = fastHash(Math.imul(y + 1, 374761393));
+                    currHty = fastHash(Math.imul(y + 31, 668265263));
+                }
+
+                const curIdx = idx;
+                const curX = x;
+                const curY = y;
+
+                idx++;
+                x++;
+                if (x === cols) { x = 0; y++; }
+                if (idx >= total) { idx = 0; x = 0; y = 0; }
+
+                const bytePos = curIdx >>> 3;
+                if (!(land[bytePos] & (1 << (curIdx & 7)))) continue;
+
+                const stateByte = curIdx >>> 2;
+                const shift = (curIdx & 3) << 1;
+                if (((state[stateByte] >> shift) & 3) !== 0) continue;
+
+                if (world.seeded && world.safeX >= 0) {
+                    if (Math.max(Math.abs(curX - world.safeX), Math.abs(curY - world.safeY)) <= 1) continue;
+                }
+
+                const hx = hxTable[curX];
+                if (fastHash(hx ^ currHy ^ seed) < densityU32) continue;
+
+                const htx = htxTable[curX];
+                const isChest = fastHash(htx ^ currHty ^ chestSalt) < 25769803;
+                if (isChest && !world.openedChests.has(curIdx)) {
+                    this.cursorIndex = idx;
+                    return { encounterChest: { x: curX, y: curY } };
+                }
+
+                state[stateByte] = (state[stateByte] & ~(3 << shift)) | (2 << shift);
+                world.revealedCount++;
+                world.remainingSafe--;
+                batchCount++;
+
+                if (player) {
+                    player.actionXp += xpAdd;
+                    player.xp += xpAdd;
+                }
+            }
+
+            this.cursorIndex = idx;
+            if (session?.progress && batchCount > 0) {
+                session.progress.tilesRevealed += batchCount;
+                session.progress.safeTilesRevealed += batchCount;
+            }
+            return null;
         }
     }
 
     // =========================================================================
-    // 3. 逆向推演与全知预测引擎 (Oracle Engine)
+    // 4. 辅助推演工具
     // =========================================================================
     class FullOracleEngine {
         static hashU32(e) {
@@ -125,121 +457,10 @@
             t = Math.imul(t ^ (t >>> 15), 2221713035);
             return ((t ^ (t >>> 16)) >>> 0);
         }
-
-        static hashMine(seed, x, y) {
-            return this.hashU32(this.hashU32(x + 1) ^ this.hashU32(Math.imul(y + 1, 374761393)) ^ seed);
-        }
-
-        static hashTreasure(seed, x, y) {
-            const r = seed ^ 2779096485;
-            return this.hashU32(this.hashU32(x + 17) ^ this.hashU32(Math.imul(y + 31, 668265263)) ^ r);
-        }
-
-        static hashGeneric(seed, x, y, r, i, a) {
-            const o = seed ^ r;
-            return this.hashU32(this.hashU32(x + i) ^ this.hashU32(Math.imul(y + a, 374761393)) ^ o);
-        }
-
-        static hashVent(seed, x, y) { return this.hashGeneric(seed, x, y, 1374510711, 23, 41); }
-        static hashShrine(seed, x, y) { return this.hashGeneric(seed, x, y, 3237998097, 29, 53); }
-        static hashBlight(seed, x, y) { return this.hashGeneric(seed, x, y, 2970294910, 37, 67); }
-
-        static toThreshold(rate) {
-            return Math.floor(rate * 4294967296);
-        }
-
-        static isLand(world, x, y) {
-            if (!world || !world.land) return false;
-            if (x < 0 || y < 0 || x >= world.cols || y >= world.rows) return false;
-            const idx = y * world.cols + x;
-            return (world.land[idx >>> 3] & (1 << (idx & 7))) !== 0;
-        }
-
-        static getTileState(world, x, y) {
-            if (!world || !world.state) return 0;
-            const idx = y * world.cols + x;
-            return (world.state[idx >>> 2] >> ((idx & 3) << 1)) & 3;
-        }
-
-        static isStartZone(world, x, y) {
-            if (!world.seeded || world.safeX < 0) return false;
-            return Math.max(Math.abs(x - world.safeX), Math.abs(y - world.safeY)) <= 1;
-        }
-
-        static isMine(world, x, y) {
-            if (!this.isLand(world, x, y)) return false;
-            if (this.isStartZone(world, x, y)) return false;
-            return this.hashMine(world.seed, x, y) < world.densityU32;
-        }
-
-        static countAdjacentMines(world, x, y) {
-            let count = 0;
-            const cols = world.cols;
-            const rows = world.rows;
-
-            for (let dy = -1; dy <= 1; dy++) {
-                const ny = y + dy;
-                if (ny < 0 || ny >= rows) continue;
-                for (let dx = -1; dx <= 1; dx++) {
-                    if (dx === 0 && dy === 0) continue;
-                    const nx = x + dx;
-                    if (nx < 0 || nx >= cols) continue;
-                    if (this.isMine(world, nx, ny)) count++;
-                }
-            }
-            return count;
-        }
-
-        static resolveBiome(world, x, y) {
-            if (!this.isLand(world, x, y)) return BIOMES.OCEAN;
-            if (!world.biomes?.length || world.biomeW <= 0 || world.biomeH <= 0) return BIOMES.GRASSLAND;
-            const ox = Math.min(world.biomeW - 1, Math.max(0, (x * world.biomeW / world.cols) | 0));
-            const oy = Math.min(world.biomeH - 1, Math.max(0, (y * world.biomeH / world.rows) | 0));
-            const biomeIdx = oy * world.biomeW + ox;
-            const raw = world.biomes[biomeIdx] ?? BIOMES.GRASSLAND;
-            return (raw < 0 || raw >= 12) ? BIOMES.GRASSLAND : raw;
-        }
-
-        static getBiomeMetadata(world, x, y) {
-            const b = this.resolveBiome(world, x, y);
-            return BIOME_DATA[b] || BIOME_DATA[BIOMES.GRASSLAND];
-        }
-
-        static predictPoi(world, x, y) {
-            if (!this.isLand(world, x, y) || this.isMine(world, x, y) || this.isStartZone(world, x, y)) {
-                return null;
-            }
-
-            const idx = y * world.cols + x;
-            if (world.debugHazards?.get(idx)) return world.debugHazards.get(idx);
-            if (world.debugTreasures?.has(idx)) return 'treasure';
-
-            const meta = this.getBiomeMetadata(world, x, y);
-            const seed = world.seed;
-
-            if (this.hashBlight(seed, x, y) < this.toThreshold(CONFIG.BASE_RATES.blight * meta.blightMult)) return 'blight';
-            if (this.hashShrine(seed, x, y) < this.toThreshold(CONFIG.BASE_RATES.shrine * meta.shrineMult)) return 'shrine';
-            if (this.hashVent(seed, x, y) < this.toThreshold(CONFIG.BASE_RATES.vent * meta.ventMult)) return 'vent';
-            if (this.hashTreasure(seed, x, y) < this.toThreshold(CONFIG.BASE_RATES.treasure * meta.chestMult)) return 'treasure';
-
-            return null;
-        }
-
-        static isPendingChest(world, x, y) {
-            if (this.getTileState(world, x, y) !== CONFIG.TILE_STATE.REVEALED) return false;
-            const idx = y * world.cols + x;
-            return this.predictPoi(world, x, y) === 'treasure' && !world.openedChests.has(idx);
-        }
-
-        static isPendingVent(world, x, y, isHealthSafe) {
-            if (!isHealthSafe || this.getTileState(world, x, y) !== CONFIG.TILE_STATE.REVEALED) return false;
-            const idx = y * world.cols + x;
-            return this.predictPoi(world, x, y) === 'vent' && !world.resolvedHazards.has(idx);
-        }
     }
 
     // =========================================================================
-    // 4. React Fiber 状态提取与安全弹窗交互
+    // 5. React Fiber 状态提取与安全弹窗交互
     // =========================================================================
     class GameStateAdapter {
         static autoCaptureFiberState() {
@@ -309,7 +530,7 @@
         }
 
         static resolveHealth(session) {
-            if (!session) return { hp: 100, maxHp: 100, isLoaded: false, isSafe: true };
+            if (!session) return { hp: 100, maxHp: 100, isLoaded: false };
             let cur;
             let max;
 
@@ -326,19 +547,14 @@
             max = Number(max);
 
             if (Number.isNaN(cur) || Number.isNaN(max) || max <= 0) {
-                return { hp: 100, maxHp: 100, isLoaded: false, isSafe: true };
+                return { hp: 100, maxHp: 100, isLoaded: false };
             }
 
-            const hp = Math.ceil(cur);
-            const maxHp = Math.ceil(max);
-            const isSafe = (hp / maxHp) >= CONFIG.SAFE_HP_RATIO_FOR_VENT && hp > 35;
-
-            return { hp, maxHp, isLoaded: true, isSafe };
+            return { hp: Math.ceil(cur), maxHp: Math.ceil(max), isLoaded: true };
         }
 
         static triggerButtonClick(btn) {
             if (!btn) return;
-
             try {
                 const reactPropsKey = Object.keys(btn).find((k) => k.startsWith('__reactProps'));
                 if (reactPropsKey && typeof btn[reactPropsKey]?.onClick === 'function') {
@@ -350,7 +566,7 @@
                     });
                 }
             } catch (e) {
-                // 忽略组件状态差异
+                // ignore
             }
 
             try {
@@ -365,7 +581,7 @@
             }
         }
 
-        static handleModals(autoPick, onAction) {
+        static handleModals(autoPick, autoKeepPlaying, onAction) {
             const session = unsafeWindow.__GAME?.session;
             const hasPendingModalState = Boolean(
                 session?.pendingChest ||
@@ -376,8 +592,8 @@
 
             const buttons = Array.from(document.querySelectorAll('button:not([disabled])'));
             let candidateBtn = null;
+            let isKeepPlayingBtn = false;
 
-            // 1. 神殿最高优先级：强制点击 "Walk away" 离开避伤
             if (session?.pendingShrine) {
                 for (const btn of buttons) {
                     if (btn.id?.includes('ai-btn')) continue;
@@ -391,7 +607,20 @@
                 }
             }
 
-            // 2. 其它弹窗（宝箱、升级、通关）
+            if (!candidateBtn && session?.pendingGeoVictories?.length) {
+                for (const btn of buttons) {
+                    if (btn.id?.includes('ai-btn')) continue;
+                    const text = (btn.textContent || '').trim().toLowerCase();
+                    const ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
+                    const combined = `${text} ${ariaLabel}`;
+                    if (combined.includes('keep playing') || combined.includes('继续')) {
+                        candidateBtn = btn;
+                        isKeepPlayingBtn = true;
+                        break;
+                    }
+                }
+            }
+
             if (!candidateBtn) {
                 for (const btn of buttons) {
                     if (btn.id?.includes('ai-btn')) continue;
@@ -414,7 +643,8 @@
             }
 
             if (candidateBtn) {
-                if (autoPick || session?.pendingShrine) {
+                const shouldClick = session?.pendingShrine || (isKeepPlayingBtn ? autoKeepPlaying : autoPick);
+                if (shouldClick) {
                     this.triggerButtonClick(candidateBtn);
                     if (typeof onAction === 'function') {
                         const actionName = candidateBtn.textContent.trim() || candidateBtn.getAttribute('aria-label') || 'Action';
@@ -430,198 +660,7 @@
     }
 
     // =========================================================================
-    // 5. 螺旋扩散与全图混合寻路器 (Turbo Spiral & Frontier Hunter)
-    // =========================================================================
-    class TurboSpiralPathfinder {
-        constructor(world) {
-            this.world = world;
-            this.cols = world.cols;
-            this.rows = world.rows;
-
-            this.visitedBits = new Uint8Array(Math.ceil((this.cols * this.rows) / 8));
-            this.interactQueue = new FastPointerQueue(); // [P0] 宝箱/喷口交互队列
-            this.zeroQueue = new FastPointerQueue();     // [P1] 0 空白引爆格队列
-            this.frontierQueue = new FastPointerQueue(); // [P2] 数字边界推图队列
-
-            this.spiralRadius = 0;
-            this.spiralMax = Math.max(this.cols, this.rows);
-            this.initSeedPoint();
-        }
-
-        initSeedPoint() {
-            const { safeX, safeY } = this.world;
-            if (safeX >= 0 && safeY >= 0) {
-                const idx = safeY * this.cols + safeX;
-                this.markVisited(idx);
-                this.addNeighbors(safeX, safeY, true);
-            }
-        }
-
-        updateWorld(world) {
-            if (this.world.seed !== world.seed || this.cols !== world.cols || this.rows !== world.rows) {
-                this.world = world;
-                this.cols = world.cols;
-                this.rows = world.rows;
-                this.visitedBits = new Uint8Array(Math.ceil((this.cols * this.rows) / 8));
-                this.interactQueue.clear();
-                this.zeroQueue.clear();
-                this.frontierQueue.clear();
-                this.spiralRadius = 0;
-                this.initSeedPoint();
-            } else {
-                this.world = world;
-            }
-        }
-
-        isVisited(idx) {
-            return (this.visitedBits[idx >>> 3] & (1 << (idx & 7))) !== 0;
-        }
-
-        markVisited(idx) {
-            this.visitedBits[idx >>> 3] |= (1 << (idx & 7));
-        }
-
-        addNeighbors(x, y, isHealthSafe) {
-            const cols = this.cols;
-            const rows = this.rows;
-
-            for (let dy = -1; dy <= 1; dy++) {
-                const ny = y + dy;
-                if (ny < 0 || ny >= rows) continue;
-
-                for (let dx = -1; dx <= 1; dx++) {
-                    if (dx === 0 && dy === 0) continue;
-                    const nx = x + dx;
-                    if (nx < 0 || nx >= cols) continue;
-
-                    const idx = ny * cols + nx;
-                    if (this.isVisited(idx)) continue;
-                    if (!FullOracleEngine.isLand(this.world, nx, ny)) continue;
-                    if (FullOracleEngine.isMine(this.world, nx, ny)) continue;
-
-                    const state = FullOracleEngine.getTileState(this.world, nx, ny);
-
-                    // 1. 待收取的宝箱/喷口
-                    if (FullOracleEngine.isPendingChest(this.world, nx, ny) || FullOracleEngine.isPendingVent(this.world, nx, ny, isHealthSafe)) {
-                        this.markVisited(idx);
-                        this.interactQueue.push({ x: nx, y: ny, idx });
-                        continue;
-                    }
-
-                    // 2. 未翻开地块
-                    if (state === CONFIG.TILE_STATE.UNOPENED) {
-                        this.markVisited(idx);
-                        const poi = FullOracleEngine.predictPoi(this.world, nx, ny);
-                        if (poi === 'treasure') {
-                            this.interactQueue.push({ x: nx, y: ny, idx });
-                        } else {
-                            const adjMines = FullOracleEngine.countAdjacentMines(this.world, nx, ny);
-                            if (adjMines === 0) {
-                                this.zeroQueue.push({ x: nx, y: ny, idx });
-                            } else {
-                                this.frontierQueue.push({ x: nx, y: ny, idx });
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        /**
-         * 🌟 以出生点为中心向外螺旋扫描陆地（避免进入北极海洋死循环）
-         */
-        findNextSpiralTile() {
-            const { cols, rows, safeX, safeY } = this.world;
-            const centerX = safeX >= 0 ? safeX : (cols >> 1);
-            const centerY = safeY >= 0 ? safeY : (rows >> 1);
-
-            while (this.spiralRadius < this.spiralMax) {
-                const r = this.spiralRadius;
-                this.spiralRadius += 10; // 步长 10 快速外扩
-
-                for (let dy = -r; dy <= r; dy += 4) {
-                    const ny = centerY + dy;
-                    if (ny < 0 || ny >= rows) continue;
-
-                    for (let dx = -r; dx <= r; dx += 4) {
-                        const nx = centerX + dx;
-                        if (nx < 0 || nx >= cols) continue;
-
-                        const idx = ny * cols + nx;
-                        if (this.isVisited(idx)) continue;
-                        if (!FullOracleEngine.isLand(this.world, nx, ny)) continue;
-                        if (FullOracleEngine.isMine(this.world, nx, ny)) continue;
-
-                        const state = FullOracleEngine.getTileState(this.world, nx, ny);
-                        if (state === CONFIG.TILE_STATE.UNOPENED) {
-                            this.markVisited(idx);
-                            return { x: nx, y: ny, idx };
-                        }
-                    }
-                }
-            }
-
-            // 全图兜底蒙特卡洛扫描
-            for (let i = 0; i < CONFIG.MAX_RANDOM_SEARCH_ATTEMPTS; i++) {
-                const rx = Math.floor(Math.random() * cols);
-                const ry = Math.floor(Math.random() * rows);
-                const idx = ry * cols + rx;
-
-                if (
-                    !this.isVisited(idx) &&
-                    FullOracleEngine.isLand(this.world, rx, ry) &&
-                    FullOracleEngine.getTileState(this.world, rx, ry) === CONFIG.TILE_STATE.UNOPENED &&
-                    !FullOracleEngine.isMine(this.world, rx, ry)
-                ) {
-                    this.markVisited(idx);
-                    return { x: rx, y: ry, idx };
-                }
-            }
-
-            return null;
-        }
-
-        getNextMove(isHealthSafe) {
-            // 1. 优先处理宝箱/喷口
-            while (this.interactQueue.length > 0) {
-                const target = this.interactQueue.shift();
-                if (FullOracleEngine.isPendingChest(this.world, target.x, target.y)) return target;
-                if (FullOracleEngine.isPendingVent(this.world, target.x, target.y, isHealthSafe)) return target;
-                const state = FullOracleEngine.getTileState(this.world, target.x, target.y);
-                if (state === CONFIG.TILE_STATE.UNOPENED && !FullOracleEngine.isMine(this.world, target.x, target.y)) {
-                    return target;
-                }
-            }
-
-            // 2. 优先引爆 0 空白格（一击翻开大片区域）
-            while (this.zeroQueue.length > 0) {
-                const target = this.zeroQueue.shift();
-                const state = FullOracleEngine.getTileState(this.world, target.x, target.y);
-                if (state === CONFIG.TILE_STATE.UNOPENED && !FullOracleEngine.isMine(this.world, target.x, target.y)) {
-                    return target;
-                } else if (state === CONFIG.TILE_STATE.REVEALED) {
-                    this.addNeighbors(target.x, target.y, isHealthSafe);
-                }
-            }
-
-            // 3. 数字边界格推图
-            while (this.frontierQueue.length > 0) {
-                const target = this.frontierQueue.shift();
-                const state = FullOracleEngine.getTileState(this.world, target.x, target.y);
-                if (state === CONFIG.TILE_STATE.UNOPENED && !FullOracleEngine.isMine(this.world, target.x, target.y)) {
-                    return target;
-                } else if (state === CONFIG.TILE_STATE.REVEALED) {
-                    this.addNeighbors(target.x, target.y, isHealthSafe);
-                }
-            }
-
-            // 4. 螺旋外扩找新陆地
-            return this.findNextSpiralTile();
-        }
-    }
-
-    // =========================================================================
-    // 6. 输入合成调度器 (完全解离视口，精准命中目标中心)
+    // 6. 输入模拟代理
     // =========================================================================
     class CanvasInputDispatcher {
         static dig(view, tileX, tileY) {
@@ -665,11 +704,16 @@
     // 7. UI 控制面板层
     // =========================================================================
     class UIController {
-        constructor({ onToggle, onAutoSkillChange }) {
+        constructor({ onToggle, onAutoSkillChange, onAntiFlashChange, onAutoKeepPlayingChange }) {
             this.onToggle = onToggle;
             this.onAutoSkillChange = onAutoSkillChange;
+            this.onAntiFlashChange = onAntiFlashChange;
+            this.onAutoKeepPlayingChange = onAutoKeepPlayingChange;
+
+            this.speedLabel = null;
             this.statusLabel = null;
             this.actionButton = null;
+            this.antiFlashStyleTag = null;
             this.lastUiUpdateTime = 0;
         }
 
@@ -679,13 +723,17 @@
                 position: fixed; bottom: 20px; right: 20px; z-index: 2147483647;
                 background: ${CONFIG.UI.BG_COLOR}; padding: 12px 16px; border-radius: 8px;
                 border: 2px solid ${CONFIG.UI.THEME_COLOR}; font-family: monospace; color: ${CONFIG.UI.TEXT_COLOR};
-                user-select: none; min-width: 175px; box-shadow: 0 4px 16px rgba(0,0,0,0.6);
+                user-select: none; min-width: 215px; box-shadow: 0 4px 16px rgba(0,0,0,0.6);
                 pointer-events: auto !important;
             `;
 
+            this.speedLabel = document.createElement('div');
+            this.speedLabel.textContent = '⚡ 速率: 0 格/秒';
+            this.speedLabel.style.cssText = `font-size: 13px; font-weight: bold; margin-bottom: 4px; text-align: center; color: ${CONFIG.UI.SPEED_COLOR};`;
+
             this.statusLabel = document.createElement('div');
-            this.statusLabel.textContent = 'Status: Waiting for engine...';
-            this.statusLabel.style.cssText = `font-size: 12px; margin-bottom: 8px; text-align: center; color: ${CONFIG.UI.THEME_COLOR};`;
+            this.statusLabel.textContent = 'Status: Waiting...';
+            this.statusLabel.style.cssText = `font-size: 11px; margin-bottom: 8px; text-align: center; color: ${CONFIG.UI.THEME_COLOR};`;
 
             this.actionButton = document.createElement('button');
             this.actionButton.id = 'ai-btn';
@@ -707,31 +755,82 @@
             this.actionButton.addEventListener('mousedown', handleInstant);
 
             const optLabel = document.createElement('label');
-            optLabel.style.cssText = 'display: flex; align-items: center; justify-content: center; font-size: 11px; margin-top: 8px; cursor: pointer; color: #aaa;';
-
-            const checkbox = document.createElement('input');
-            checkbox.type = 'checkbox';
-            checkbox.style.marginRight = '6px';
-            checkbox.onchange = (e) => this.onAutoSkillChange(e.target.checked);
-
-            optLabel.appendChild(checkbox);
+            optLabel.style.cssText = 'display: flex; align-items: center; justify-content: flex-start; font-size: 11px; margin-top: 8px; cursor: pointer; color: #aaa;';
+            const autoSkillCheckbox = document.createElement('input');
+            autoSkillCheckbox.type = 'checkbox';
+            autoSkillCheckbox.style.marginRight = '6px';
+            autoSkillCheckbox.onchange = (e) => this.onAutoSkillChange(e.target.checked);
+            optLabel.appendChild(autoSkillCheckbox);
             optLabel.appendChild(document.createTextNode('自动秒选技能/开宝箱'));
+
+            const conquestLabel = document.createElement('label');
+            conquestLabel.style.cssText = 'display: flex; align-items: center; justify-content: flex-start; font-size: 11px; margin-top: 6px; cursor: pointer; color: #7ec8dc;';
+            const conquestCheckbox = document.createElement('input');
+            conquestCheckbox.type = 'checkbox';
+            conquestCheckbox.checked = true;
+            conquestCheckbox.style.marginRight = '6px';
+            conquestCheckbox.onchange = (e) => this.onAutoKeepPlayingChange(e.target.checked);
+            conquestLabel.appendChild(conquestCheckbox);
+            conquestLabel.appendChild(document.createTextNode('自动继续征服 (弹窗秒退)'));
+
+            const flashLabel = document.createElement('label');
+            flashLabel.style.cssText = 'display: flex; align-items: center; justify-content: flex-start; font-size: 11px; margin-top: 6px; cursor: pointer; color: #e0c060;';
+            const flashCheckbox = document.createElement('input');
+            flashCheckbox.type = 'checkbox';
+            flashCheckbox.checked = true;
+            flashCheckbox.style.marginRight = '6px';
+            flashCheckbox.onchange = (e) => this.setAntiFlashEnabled(e.target.checked);
+            flashLabel.appendChild(flashCheckbox);
+            flashLabel.appendChild(document.createTextNode('屏蔽升级黄光闪烁'));
 
             const tip = document.createElement('div');
             tip.textContent = '快捷键: 空格 / ESC 紧急暂停';
             tip.style.cssText = 'font-size: 9px; color: #888; text-align: center; margin-top: 6px;';
 
+            container.appendChild(this.speedLabel);
             container.appendChild(this.statusLabel);
             container.appendChild(this.actionButton);
             container.appendChild(optLabel);
+            container.appendChild(conquestLabel);
+            container.appendChild(flashLabel);
             container.appendChild(tip);
             document.body.appendChild(container);
+
+            this.setAntiFlashEnabled(true);
+        }
+
+        setAntiFlashEnabled(enabled) {
+            if (enabled) {
+                if (!this.antiFlashStyleTag) {
+                    this.antiFlashStyleTag = document.createElement('style');
+                    this.antiFlashStyleTag.id = 'ws-anti-flash-style';
+                    this.antiFlashStyleTag.textContent = `
+                        .hud-flash-level {
+                            display: none !important;
+                            opacity: 0 !important;
+                            visibility: hidden !important;
+                            animation: none !important;
+                        }
+                    `;
+                    document.head.appendChild(this.antiFlashStyleTag);
+                }
+            } else if (this.antiFlashStyleTag) {
+                this.antiFlashStyleTag.remove();
+                this.antiFlashStyleTag = null;
+            }
+            this.onAntiFlashChange?.(enabled);
+        }
+
+        setSpeed(tps) {
+            if (this.speedLabel) {
+                this.speedLabel.textContent = `⚡ 速率: ${tps.toLocaleString()} 格/秒`;
+            }
         }
 
         setStatus(text, force = false) {
             const now = Date.now();
             if (force || now - this.lastUiUpdateTime >= CONFIG.UI_THROTTLE_MS) {
-                if (this.statusLabel) this.statusLabel.textContent = `Status: ${text}`;
+                if (this.statusLabel) this.statusLabel.textContent = text;
                 this.lastUiUpdateTime = now;
             }
         }
@@ -741,29 +840,49 @@
             this.actionButton.textContent = isRunning ? 'Stop' : 'Start';
             this.actionButton.style.borderColor = isRunning ? CONFIG.UI.STOP_COLOR : CONFIG.UI.THEME_COLOR;
             this.actionButton.style.color = isRunning ? CONFIG.UI.STOP_COLOR : CONFIG.UI.TEXT_COLOR;
+            if (!isRunning) this.setSpeed(0);
         }
 
         setReady() {
             if (this.actionButton) {
                 this.actionButton.disabled = false;
-                this.setStatus('Ready', true);
+                this.setStatus('Status: Ready', true);
             }
         }
     }
 
     // =========================================================================
-    // 8. 主控应用调度器 (WorldSweeperBot)
+    // 8. 主控应用调度器 (WebGPU 异步流水线)
     // =========================================================================
     class WorldSweeperBot {
         constructor() {
             this.isRunning = false;
+            this.isComputing = false;
             this.autoPickSkills = false;
-            this.tickerId = null;
-            this.pathfinder = null;
+            this.autoKeepPlaying = true;
+            this.engine = null;
+            this.isModalActive = false;
+
+            this.speedSampleTime = 0;
+            this.speedSampleCount = 0;
+            this.currentTps = 0;
+
+            this.channel = new MessageChannel();
+            this.channel.port1.onmessage = async () => {
+                if (!this.isRunning || this.isModalActive || this.isComputing) return;
+                this.isComputing = true;
+                await this.processGpuWork();
+                this.isComputing = false;
+                if (this.isRunning && !this.isModalActive) {
+                    this.channel.port2.postMessage(null);
+                }
+            };
 
             this.ui = new UIController({
                 onToggle: () => this.toggle(),
                 onAutoSkillChange: (val) => { this.autoPickSkills = val; },
+                onAntiFlashChange: () => {},
+                onAutoKeepPlayingChange: (val) => { this.autoKeepPlaying = val; },
             });
         }
 
@@ -771,6 +890,7 @@
             this.ui.mount();
             this.bindShortcuts();
             this.waitForGameReady();
+            this.startUiAndModalLoop();
         }
 
         bindShortcuts() {
@@ -789,9 +909,58 @@
                 if (GameStateAdapter.isReady()) {
                     clearInterval(timer);
                     this.ui.setReady();
-                    console.info('[WorldSweeper] ✅ 螺旋极速扫雷引擎已就绪！');
+                    console.info('[WorldSweeper] ✅ WebGPU GPGPU 显卡引擎已就绪！');
                 }
-            }, CONFIG.READY_POLL_INTERVAL_MS);
+            }, 400);
+        }
+
+        startUiAndModalLoop() {
+            const renderTick = () => {
+                if (this.isRunning) {
+                    const game = GameStateAdapter.getGameInstance();
+                    if (game && game.world) {
+                        const hasModal = GameStateAdapter.handleModals(this.autoPickSkills, this.autoKeepPlaying, (name) => {
+                            this.ui.setStatus(`🎁 自动处理: ${name}`, true);
+                        });
+
+                        const prevModal = this.isModalActive;
+                        this.isModalActive = hasModal;
+
+                        if (hasModal) {
+                            this.ui.setStatus('⏸️ 发现奖励/升级！', true);
+                        } else if (prevModal && !hasModal) {
+                            this.channel.port2.postMessage(null);
+                        }
+
+                        const health = GameStateAdapter.resolveHealth(game.session);
+                        const status = game.session?.status;
+                        if (status === 'dead' || (health.isLoaded && health.hp <= 0 && status !== 'exploring')) {
+                            this.ui.setStatus('❤️ 角色已阵亡', true);
+                            this.stop();
+                            return;
+                        }
+                        if (status === 'victory') {
+                            this.ui.setStatus('🎉 胜利通关！', true);
+                            this.stop();
+                            return;
+                        }
+
+                        const now = performance.now();
+                        const elapsed = now - this.speedSampleTime;
+                        if (elapsed >= CONFIG.SPEED_SAMPLE_INTERVAL_MS) {
+                            const delta = game.world.revealedCount - this.speedSampleCount;
+                            this.currentTps = Math.max(0, Math.round((delta * 1000) / elapsed));
+                            this.ui.setSpeed(this.currentTps);
+
+                            this.speedSampleTime = now;
+                            this.speedSampleCount = game.world.revealedCount;
+                        }
+                        this.ui.setStatus(`已开辟: ${game.world.revealedCount.toLocaleString()} / 剩: ${game.world.remainingSafe.toLocaleString()}`);
+                    }
+                }
+                requestAnimationFrame(renderTick);
+            };
+            requestAnimationFrame(renderTick);
         }
 
         toggle() {
@@ -807,88 +976,55 @@
                 return;
             }
 
-            this.isRunning = true;
-            this.ui.setRunningState(true);
-            this.pathfinder = new TurboSpiralPathfinder(g.world);
+            if (!g.world.seeded) {
+                const startX = g.world.safeX >= 0 ? g.world.safeX : (g.world.cols >> 1);
+                const startY = g.world.safeY >= 0 ? g.world.safeY : (g.world.rows >> 1);
+                CanvasInputDispatcher.dig(g.view, startX, startY);
+            }
 
-            if (this.tickerId) clearInterval(this.tickerId);
-            this.tickerId = setInterval(() => this.tick(), CONFIG.TICK_INTERVAL_MS);
+            this.isRunning = true;
+            this.isModalActive = false;
+            this.isComputing = false;
+            this.ui.setRunningState(true);
+
+            this.speedSampleTime = performance.now();
+            this.speedSampleCount = g.world.revealedCount;
+
+            if (!this.engine || this.engine.seed !== g.world.seed || this.engine.cols !== g.world.cols) {
+                this.engine = new WebGPUSweeperEngine(g.world);
+            } else {
+                this.engine.updateWorld(g.world);
+            }
+
+            this.channel.port2.postMessage(null);
         }
 
         stop() {
             this.isRunning = false;
-            if (this.tickerId) {
-                clearInterval(this.tickerId);
-                this.tickerId = null;
-            }
+            this.isModalActive = false;
+            this.isComputing = false;
             this.ui.setRunningState(false);
-            this.ui.setStatus('Stopped', true);
+            this.ui.setStatus('Status: Stopped', true);
         }
 
-        tick() {
-            if (!this.isRunning) return;
+        async processGpuWork() {
+            const game = unsafeWindow.__GAME;
+            if (!game || !game.world) return;
 
-            const game = GameStateAdapter.getGameInstance();
-            if (!game || !game.world || !game.view) return;
-
-            const { world, session, view } = game;
-            this.pathfinder.updateWorld(world);
-
-            // 1. 弹窗与神殿自动处理 (神殿秒退避伤)
-            const hasModal = GameStateAdapter.handleModals(this.autoPickSkills, (name) => {
-                this.ui.setStatus(`🎁 自动处理: ${name}`, true);
-            });
-            if (hasModal) {
-                this.ui.setStatus('⏸️ 发现奖励/升级！', true);
-                return;
+            const result = await this.engine.sweepGpuBatch(game.session);
+            if (result?.encounterChest) {
+                CanvasInputDispatcher.dig(game.view, result.encounterChest.x, result.encounterChest.y);
             }
 
-            // 2. 生命值与存活检测
-            const health = GameStateAdapter.resolveHealth(session);
-            const status = session.status;
-            this.ui.setStatus(`Revealed: ${world.revealedCount}`);
-
-            if (status === 'dead' || (health.isLoaded && health.hp <= 0 && status !== 'exploring')) {
-                this.ui.setStatus('❤️ 角色已阵亡', true);
+            if (game.world.remainingSafe <= 0) {
+                this.ui.setStatus('🎉 全球安全区清理完成！', true);
                 this.stop();
-                return;
-            }
-
-            if (status === 'victory') {
-                this.ui.setStatus('🎉 胜利通关！', true);
-                this.stop();
-                return;
-            }
-
-            // 🌟 处于洪水动画期间，显示状态并把控制权让给游戏渲染
-            if (world.flood && world.flood.head < world.flood.tail) {
-                this.ui.setStatus(`🌊 连锁轰炸中: ${world.revealedCount}`);
-                return;
-            }
-
-            // 3. 螺旋高频连发
-            for (let i = 0; i < CONFIG.MAX_DIGS_PER_TICK; i++) {
-                if (!this.isRunning) break;
-
-                const target = this.pathfinder.getNextMove(health.isSafe);
-                if (!target) {
-                    this.ui.setStatus('🎉 全球安全区清理完成！', true);
-                    this.stop();
-                    return;
-                }
-
-                CanvasInputDispatcher.dig(view, target.x, target.y);
-                this.pathfinder.addNeighbors(target.x, target.y, health.isSafe);
-
-                if (world.flood && world.flood.head < world.flood.tail) {
-                    break;
-                }
             }
         }
     }
 
     // =========================================================================
-    // 9. 脚本挂载入口
+    // 9. 挂载入口
     // =========================================================================
     const app = new WorldSweeperBot();
     if (document.readyState === 'loading') {

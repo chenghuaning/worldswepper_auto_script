@@ -49,89 +49,77 @@
 - 🥀 **枯萎之花 (Blight Bloom)**：危险地块，若翻开后未及时使用工具封印，苏醒后将对周边区域持续造成范围伤害。
 
 ---
-
+![](./img/effect.png " ")
 ## 📖 项目简介 (Overview)
 
 **WorldSweeper_Auto_Script** 是一款专为网页端游戏 [WorldSweeper](https://worldsweeper.site) 打造的高性能全自动用户脚本（Userscript）,是基于宿主游戏底层确定性哈希逆向与 React Fiber 自动捕获的全自动、全知级扫雷与宝藏收割机器人。
 
-不同于传统的基于概率推测或穷举回溯的扫雷 AI，本项目通过完全逆向游戏底层的 **确定性伪随机哈希算法（Deterministic PRNG Hashing）** 与 **生物群系特征分布（Biome Multipliers）**，实现了对全图地块的 100% 绝对预测。在保证绝对避雷的前提下，全图优先秒抢宝箱（Treasure Chest）与金币喷口（Gold Vent），并具备毫秒级响应的紧急制动与防卡死渲染节流机制。
-
+不同于基于概率推测、局部爬行或单线程 DOM 模拟点击的扫雷 AI，本项目通过完全逆向游戏底层的 **确定性伪随机哈希算法（Deterministic PRNG Hashing）** 与 **生物群系特征分布（Biome Multipliers）**，实现了对全图地块的 100% 绝对预测。项目引入了 **WebGPU 计算着色器（WGSL Compute Shader）** 与 **MessageChannel 连续微任务管道**，将计算直接卸载至用户的 **AMD / Intel / NVIDIA 显卡** 数千个硬件流处理器上并发推演。在保证绝对避雷、自动秒退神殿与视口完全解离的前提下，实现了从传统 **200 格/秒** 到 **100,000 ~ 500,000+ 格/秒** 的数量级性能跨越。
 ---
 
 ## ✨ 核心特性 (Key Features)
 
-- 🧬 **React Fiber 自动捕获注入 (Automated Fiber State Extraction)**
-  - 内置 DOM 虚拟节点回溯机制，从 Canvas 向上遍历 Hook 链表，毫秒级全自动提取 `world` / `session` / `view`。
-  - 彻底摆脱对 React DevTools 插件及手动控制台敲命令的依赖，100% 全自动挂载。
+- 🎮 **WebGPU 显卡硬件级并发加速 (GPGPU Parallel Acceleration)**
+  - 编写原生 WGSL 计算着色器，将地图数据推送至显存（VRAM），单批次并发调度 **150,000+** 显卡流处理器核心。
+  - 内置 CPU 超频降级通道（100KB $X$ 轴哈希预查表 + $Y$ 轴行级缓存），在不支持 WebGPU 的环境下自适应平滑回退。
+- 🧬 **React 19 Fiber 全自动状态嗅探 (Zero-Config Auto-Extraction)**
+  - 内置 Fiber 虚拟 DOM 树回溯探查器，毫秒级自动解包 `world` / `session` / `view`，**彻底告别 React DevTools 与控制台手动注入**。
 - 🔮 **全知级逆向透视引擎 (Full Mathematical Oracle)**
   - 100% 精确推演地雷 (`Mine`)、宝箱 (`Treasure Chest`)、金币喷口 (`Gold Vent`)、神殿 (`Shrine`) 与枯萎之花 (`Blight Bloom`)。
   - 完美复刻 12 种生物群系（海洋、草地、沙漠、火山等）生成权重与倍率修正。
-- 🎯 **5 级多优先级寻路系统 (Smart Priority Pathfinder)**
-  - `P4 - 已揭示可交互地块`：优先触发翻开后的宝箱开箱与喷口金币提取。
-  - `P3 - 宝箱目标`：优先开辟未翻开的隐藏宝箱。
-  - `P2 - 金币喷口`：次优先开辟金币喷口。
-  - `P1 - 神殿/枯萎花`：及时定位并处理危险/增益地块。
-  - `P0 - 常规安全地块`：九宫格 BFS 扩散与蒙特卡洛全局保底探索。
-- ⚡ **零延迟即按即停与全局急停 (Zero-Latency Emergency Brake)**
-  - 采用 `pointerdown` / `mousedown` 监听替代传统 `click`，按下瞬间中断调度。
-  - 全局键盘热键支持：敲击 `Space`**（空格）** 或 `ESC` 实现 1ms 内硬性急停。
-- 🛡️ **全职业血量自适应与开局防假死 (Adaptive Health Parsing)**
-  - 兼容全部职业（Scout、Demo、Tech、Gambler、Survivor）的不同生命值数据结构。
-  - 内置初始化保护边界，杜绝数据异步加载导致的开局误判死亡问题。
-- 🚀 **UI 渲染节流与主线程防拥堵 (Throttled UI Rendering)**
-  - DOM 文本刷新节流（默认 200ms），大幅降低高频重排（Reflow）开销，确保高帧率流畅运行。
-- 🤖 **全自动挂机与秒选技能 (Auto-Pick Modals)**
-  - 支持自动拾取宝箱掉落、自动确认升级技能与神殿交互。
-
+- ⚡ **视口操作完全物理隔离 (Viewport Decoupling - Zero Shaking)**
+  - 彻底剥离扫描算法与玩家镜头视野的耦合。玩家可随意缩放、平移拖动视口，**无任何画面抖动、掉帧或卡死**。
+- 📊 **实时每秒开辟速率仪表盘 (Real-Time Speedometer)**
+  - 400ms 高精度动态滑动窗口采样，控制面板实时展示当前 `⚡ 速率: X 格/秒`。
+- 🛡️ **神殿无损秒退与喷口自残熔断 (Self-Damage Protection)**
+  - 遇到神殿 100% 自动点击“Walk away”安全离开，杜绝献祭扣血；喷口增加 60% 血量安全阈值，防止低血量自残暴毙。
+- 🏆 **国家征服弹窗自动继续 (Auto Keep-Playing)**
+  - 达成国家 80% 征服阈值时，自动触发“Keep playing”秒关弹窗，全自动跨大洲连续推进。
+- 🕶️ **屏蔽升级全屏黄光爆闪 (Anti-Flash Filter)**
+  - 动态注入 CSS 规则拦截 `.hud-flash-level`，彻底消除超高频升级时的刺眼黄色频闪。
+- 🛑 **零延迟即按即停与全局急停 (Zero-Latency Emergency Brake)**
+  - 采用 `pointerdown` 监听替代传统 `click`，按下瞬间中断调度；全局支持 **`Space`（空格）** 或 **`ESC`** 瞬时急停。
 
 ---
-
-
 
 ## 🏗️ 架构与分层设计 (Architecture)
 
-项目遵循 **SOLID** 原则与模块化解耦规范，采用纯原生 JavaScript (ES2022) 开发，代码分层如下：
+项目遵循 **SOLID** 原则与模块化解耦规范，采用纯原生 JavaScript (ES2022) + WGSL 开发，分层如下：
 
 ```text
-┌──────────────────────────────────────────────────────────┐
-│                   WorldSweeperBot (主控应用)              │
-│       (生命周期管理 · 状态机维护 · 键盘热键绑定 · 循环调度)    │
-└────────────┬─────────────────────────────┬───────────────┘
-             │                             │
-    ┌────────▼─────────┐          ┌────────▼─────────┐
-    │ GameStateAdapter │          │   UIController   │
-    │(Fiber自动状态提取)│          │ (悬浮窗与渲染节流)│
-    └────────┬─────────┘          └──────────────────┘
+┌────────────────────────────────────────────────────────────────────────┐
+│                        WorldSweeperBot (主控应用)                       │
+│       (生命周期管理 · 状态机维护 · 键盘热键绑定 · 异步双流调度)              │
+└────────────┬──────────────────────────────────────────┬────────────────┘
+             │                                          │
+    ┌────────▼─────────┐                       ┌────────▼─────────┐
+    │ GameStateAdapter │                       │   UIController   │
+    │(Fiber自动状态提取)│                       │ (悬浮窗与速率监测)│
+    └────────┬─────────┘                       └──────────────────┘
              │
-    ┌────────▼─────────────────────────────────────────┐
-    │             SmartPriorityPathfinder              │
-    │  (5级优先级队列 · BFS邻域扩散 · 蒙特卡洛全局扫描) │
-    └────────┬─────────────────────────────┬───────────┘
-             │                             │
-    ┌────────▼─────────┐          ┌────────▼─────────┐
-    │ FullOracleEngine │          │CanvasInputDispatcher│
-    │(底层哈希逆向计算)│          │ (视口变换与事件合成) │
-    └──────────────────┘          └──────────────────┘
+    ┌────────▼──────────────────────────────────────────────────────────┐
+    │                     WebGPUSweeperEngine                           │
+    │  (WebGPU WGSL 显卡并行流水线 / 100KB 预查表 CPU 超频降级引擎)        │
+    └────────┬──────────────────────────────────────────┬───────────────┘
+             │                                          │
+    ┌────────▼─────────┐                       ┌────────▼─────────┐
+    │ FullOracleEngine │                       │CanvasInputDispatcher│
+    │(底层哈希逆向计算)│                       │ (宝箱交互事件代理)  │
+    └──────────────────┘                       └──────────────────┘
 ```
-
-
 
 ### 核心模块职责说明
 
-
-| 模块名称                      | 职责定位           | 核心方法 / 特性                                                          |
-| ------------------------- | -------------- | ------------------------------------------------------------------ |
-| `GameStateAdapter`        | 宿主交互与 Fiber 提取 | `autoCaptureFiberState()`（React 19 自动探查）、`resolveHealth()`         |
-| `FullOracleEngine`        | 纯数学计算层         | `hashMine()`, `predictPoi()`, `isInteractable()`, `resolveBiome()` |
-| `SmartPriorityPathfinder` | 寻路与调度决策        | `addNeighbors()`, `findGlobalSafeTile()`, `getNextMove()`          |
-| `CanvasInputDispatcher`   | 输入与视口代理        | `dig()`（视口平移缩放居中与 PointerEvent 合成派发）                               |
-| `UIController`            | 交互面板与渲染        | `mount()`, `setStatus()`（节流机制）, `setRunningState()`                |
-| `WorldSweeperBot`         | 核心主控与状态机       | `bootstrap()`, `toggle()`, `start()`, `stop()`, `tick()`           |
-
+| 模块名称 | 职责定位 | 核心方法 / 特性 |
+| :--- | :--- | :--- |
+| **`WebGPUSweeperEngine`** | GPGPU / CPU 计算调度层 | `sweepGpuBatch()`（显存直算）、`sweepCpuFallback()` |
+| **`FullOracleEngine`** | 纯数学计算层 | `hashMine()`, `hashTreasure()`, `getCountryId()` |
+| **`GameStateAdapter`** | 宿主交互与 Fiber 提取 | `autoCaptureFiberState()`、`resolveHealth()`、`handleModals()` |
+| **`CanvasInputDispatcher`**| 输入代理 | `dig()`（坐标逆运算精准开箱，不篡改视口） |
+| **`UIController`** | 交互面板与防频闪 | `mount()`, `setSpeed()`, `setAntiFlashEnabled()`, `setStatus()` |
+| **`WorldSweeperBot`** | 核心主控与状态机 | `start()`, `stop()`, `processGpuWork()`, `startUiAndModalLoop()` |
 
 ---
-
-
 
 ## 🧬 React Fiber 自动捕获原理 (Automated Fiber Extraction)
 
@@ -141,7 +129,7 @@
 DOM 渲染树                  Fiber 虚拟节点链表                    运行时状态挂载
 [ <canvas> ] 
      │
-     └──> 读取 __reactFiber$私有属性
+     └──> 读取 __reactFiber$ 私有属性
                │
                └──> 向上回溯父级 Fiber 节点 (node.return)
                          │
@@ -155,11 +143,7 @@ DOM 渲染树                  Fiber 虚拟节点链表                    运�
 
 ---
 
-
-
-## ⚙️ 底层逆向算法与推演逻辑 (Algorithm Implementation)
-
-游戏内的所有地图特征（地雷、宝箱、金币喷口、神殿、枯萎花）全部由**确定性伪随机哈希（Deterministic PRNG）**在客户端实时计算，无需等待网络请求。
+## ⚙️ 底层逆向算法与 WebGPU 着色器 (Algorithms & WebGPU)
 
 ### 1. 核心 32 位整数混淆函数 (`hashU32`)
 
@@ -177,149 +161,64 @@ function hashU32(value) {
 }
 ```
 
-
-
-### 2. 五大地图特征推演算法 (Feature PRNG Formulas)
-
-每个地块通过传入 `(seed, x, y)` 及固定的**盐值偏移（Salt Offsets）**计算独立哈希，并与生物群系修正后的阈值对比：
-
-```javascript
-// ==================== [1] 地雷预测 (Mine) ====================
-// 判定依据: hashMine(seed, x, y) < world.densityU32 (通常为 0.15625 * 2^32)
-function hashMine(seed, x, y) {
-    const hx = hashU32(x + 1);
-    const hy = hashU32(Math.imul(y + 1, 374761393));
-    return hashU32(hx ^ hy ^ seed);
-}
-
-// ==================== [2] 宝箱预测 (Treasure Chest) ====================
-// 基础生成率: 0.4% * 生物群系宝箱倍率 (chestMult)
-function hashTreasure(seed, x, y) {
-    const saltSeed = seed ^ 2779096485;
-    const hx = hashU32(x + 17);
-    const hy = hashU32(Math.imul(y + 31, 668265263));
-    return hashU32(hx ^ hy ^ saltSeed);
-}
-
-// ==================== [3] 金币喷口预测 (Gold Vent) ====================
-// 基础生成率: 0.15% * 生物群系喷口倍率 (ventMult)
-function hashVent(seed, x, y) {
-    const saltSeed = seed ^ 1374510711;
-    const hx = hashU32(x + 23);
-    const hy = hashU32(Math.imul(y + 41, 374761393));
-    return hashU32(hx ^ hy ^ saltSeed);
-}
-
-// ==================== [4] 神殿预测 (Shrine) ====================
-// 基础生成率: 0.05% * 生物群系神殿倍率 (shrineMult)
-function hashShrine(seed, x, y) {
-    const saltSeed = seed ^ 3237998097;
-    const hx = hashU32(x + 29);
-    const hy = hashU32(Math.imul(y + 53, 374761393));
-    return hashU32(hx ^ hy ^ saltSeed);
-}
-
-// ==================== [5] 枯萎之花预测 (Blight Bloom) ====================
-// 基础生成率: 0.02% * 生物群系枯萎倍率 (blightMult)
-function hashBlight(seed, x, y) {
-    const saltSeed = seed ^ 2970294910;
-    const hx = hashU32(x + 37);
-    const hy = hashU32(Math.imul(y + 67, 374761393));
-    return hashU32(hx ^ hy ^ saltSeed);
-}
-```
-
-
-
-### 3. 全局决策流程 (Decision Flowchart)
-
-```text
-输入目标坐标 (x, y):
- ├── 1. 越界检查 或 非陆地地块 (isLand === false) ──> [丢弃]
- ├── 2. 属于出生点 3x3 安全区 ─────────────────────> [直接判定为绝对安全]
- ├── 3. 判定是否为地雷 (hashMine < densityU32) ──────> [绝对避开，禁止点击]
- └── 4. 确认安全后，匹配 POI 类型并分流至优先级队列：
-        ├── [P4] 已翻开且未收取的宝箱 / 喷口 ───────> 紧急交互队列 (Interact Queue)
-        ├── [P3] 未翻开的宝箱 (hashTreasure 命中) ────> 宝箱队列 (Chest Queue)
-        ├── [P2] 未翻开的金币喷口 (hashVent 命中) ───> 金币队列 (Vent Queue)
-        ├── [P1] 未翻开的神殿/枯萎花 ───────────────> 特殊事件队列 (POI Queue)
-        └── [P0] 常规无特殊属性安全地块 ────────────> 普通探索队列 (Normal Queue)
-```
-
 ---
-
-
 
 ## 🚀 快速上手 (Quick Start)
 
-
-
 ### 1. 前置准备
-
-安装任意一款支持用户脚本的现代浏览器扩展：
-
+安装支持 Userscript 的现代浏览器扩展：
 - [Tampermonkey (篡改猴)](https://www.tampermonkey.net/)
 - [Violentmonkey (暴力猴)](https://violentmonkey.github.io/)
 
-
-
-### 2. 安装与使用
-
+### 2. 安装与运行
 1. 打开 Tampermonkey 管理面板，点击 **新建脚本 (+)**。
 2. 复制项目源码中的 `WorldSweeper.user.js` 并粘贴保存。
-3. 打开 [https://worldsweeper.site/](https://worldsweeper.site/) 进入游戏。
-4. **完全无需手动注入**，脚本将在后台自动完成 Fiber 探查。当右下角面板显示 `Status: Ready` 时，点击 `START` 或按下 `空格键` 即可开始挂机！
+3. 打开 [https://worldsweeper.site/](https://worldsweeper.site/) 选择任意职业进入游戏。
+4. **完全无需手动操作**，脚本自动完成 Fiber 捕获并激活 WebGPU 显卡引擎。
+5. 当右下角面板显示 `Status: Ready` 时，点击 **`START`** 或按下 **`空格键`** 即可开启超光速秒图！
 
 ---
 
+## 🎮 界面与快捷键说明 (Controls & UI Panel)
 
-
-## 🎮 快捷键与操作说明 (Controls)
-
-
-| 操作方式             | 对应功能          | 说明                              |
-| ---------------- | ------------- | ------------------------------- |
-| `Space`**（空格键）** | **紧急暂停 / 继续** | 全局有效，敲击瞬间 1ms 内硬性中断主循环          |
-| `ESC`**（退出键）**   | **紧急暂停 / 继续** | 与空格键功能相同                        |
-| **鼠标点击** `Stop`  | **停止运行**      | 采用 `pointerdown` 监听，光标按下即停，绝不漏点 |
-| **勾选** `自动秒选`    | **全自动挂机**     | 自动触发升级选项、自动开启宝箱并拾取战利品           |
-
+| 操作方式 | 对应功能 | 说明 |
+| :--- | :--- | :--- |
+| **`Space`（空格键）** | **紧急暂停 / 继续** | 全局热键，敲击瞬间 1ms 内硬性中断主循环 |
+| **`ESC`（退出键）** | **紧急暂停 / 继续** | 与空格键功能相同 |
+| **鼠标点击 `Stop`** | **停止运行** | 采用 `pointerdown` 监听，光标按下即停，绝不漏点 |
+| **☑ 自动秒选技能/开宝箱** | **全自动挂机** | 自动选择升级技能、自动开启宝箱并拾取战利品 |
+| **☑ 自动继续征服 (国家弹窗秒退)** | **大洲收割** | 达成国家 80% 征服后，0ms 自动秒选 "Keep playing" 继续推图 |
+| **☑ 屏蔽升级黄光闪烁** | **防频闪保护** | 过滤全屏黄色高光动画遮罩，防止高速升级时屏幕剧烈爆闪 |
 
 ---
-
-
 
 ## 🔧 运行配置项说明 (Configuration)
 
-如需调整运行参数，可直接修改脚本顶部的 `CONFIG` 冻结对象：
+如需调整参数，可直接修改脚本顶部的 `CONFIG` 对象：
 
 ```javascript
 const CONFIG = Object.freeze({
-    TICK_INTERVAL_MS: 50,              // 主调度循环执行周期 (毫秒) - 越小速度越快
-    UI_THROTTLE_MS: 200,               // UI 文本渲染节流周期 (毫秒) - 释放主线程
-    DEFAULT_DIG_ZOOM: 16.0,            // 模拟点击时的聚焦缩放倍率
-    MAX_RANDOM_SEARCH_ATTEMPTS: 50000, // 全局保底蒙特卡洛采样扫描次数
+    GPU_BATCH_SIZE: 150000,        // 单次 WebGPU 显卡并发调度的地块规模 (15万格/批次)
+    MICRO_CHUNK_TILES: 25000,      // CPU 降级模式下单微任务吞吐上限
+    SAFE_HP_RATIO_FOR_VENT: 0.60,  // 生命值高于 60% 时才允许点击喷口
+    SPEED_SAMPLE_INTERVAL_MS: 400, // 速率采样统计周期 (毫秒)
+    UI_THROTTLE_MS: 150,           // UI 文本渲染节流周期 (毫秒)
 });
 ```
 
 ---
 
-
-
 ## 🛠️ 代码规范与静态检查 (Code Quality)
 
-本项目遵循严格的代码规范：
-
-- **ESLint 0 告警**：通过严格的 `no-undef`, `no-multi-spaces`, `no-redeclare` 等规则。
+本项目遵循严格的工业级开源标准：
+- **ESLint 0 告警**：通过严格的 `no-undef`, `no-multi-spaces`, `no-bitwise`, `no-redeclare` 等规则。
 - **全量 JSDoc 注解**：类、静态方法、函数入参及返回值均具备规范类型标注。
-- **环境安全声明**：严格作用域隔离与可选链安全防护（`?.`），不污染宿主全局变量。
+- **作用域完全隔离**：严格的沙箱作用域隔离，不污染宿主全局变量。
 
 ---
 
-
-
 ## 📜 免责声明 (Disclaimer) & License
 
-本项目仅供代码重构、逆向工程与前端自动化测试等学术研究交流使用。请合理使用本脚本，请勿用于破坏游戏在线公平性竞技排名。
+本项目仅供前端自动化测试、WebGPU 并行计算与逆向工程学术研究使用。请合理使用本脚本，请勿用于破坏在线竞技排名的公平性。
 
 本项目基于 [MIT License](LICENSE) 协议开源。

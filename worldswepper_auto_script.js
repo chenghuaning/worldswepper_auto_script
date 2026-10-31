@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         WorldSweeper (Pixel-Perfect Oracle & Treasure Hunter - WebGPU GPGPU v45)
+// @name         WorldSweeper (Pixel-Perfect Oracle & Treasure Hunter - WebGPU GPGPU v46.2)
 // @namespace    https://github.com/chenghuaning/worldswepper_auto_script
-// @version      45.0.0
-// @description  全知透视扫雷
+// @version      46.2.0
+// @description  全知透视扫雷 + 自动升级/技能选择 + 全类型闪烁与遮罩过滤
 // @author       WorldSweeper Engineering Team
 // @license      MIT
 // @match        https://worldsweeper.site/*
@@ -581,6 +581,43 @@
             }
         }
 
+        static isVisible(el) {
+            return Boolean(el && (el.offsetWidth > 0 || el.offsetHeight > 0 || el.getClientRects().length > 0));
+        }
+
+        /**
+         * 游戏更新后 HUD 容器也带有 z-* 类名，不能再靠
+         * `div[class*="z-"]` 判断弹窗，否则会误点缩放/暂停按钮。
+         * 这里只找真正的全屏遮罩层，并按 z-index 取最上层。
+         */
+        static getModalRoot() {
+            const selectors = [
+                'div.absolute.inset-0[class*="bg-black/"]',
+                'div.fixed.inset-0[class*="bg-black/"]',
+                '[role="dialog"]',
+            ];
+            const roots = [];
+            for (const selector of selectors) {
+                for (const el of document.querySelectorAll(selector)) {
+                    if (!roots.includes(el) && this.isVisible(el) && el.querySelector('button:not([disabled])')) {
+                        roots.push(el);
+                    }
+                }
+            }
+            roots.sort((a, b) => {
+                const az = Number.parseInt(getComputedStyle(a).zIndex, 10) || 0;
+                const bz = Number.parseInt(getComputedStyle(b).zIndex, 10) || 0;
+                return bz - az;
+            });
+            return roots[0] || null;
+        }
+
+        static buttonLabel(btn) {
+            const text = (btn.textContent || '').trim().toLowerCase();
+            const ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
+            return `${text} ${ariaLabel}`;
+        }
+
         static handleModals(autoPick, autoKeepPlaying, onAction) {
             const session = unsafeWindow.__GAME?.session;
             const hasPendingModalState = Boolean(
@@ -589,73 +626,72 @@
                 session?.pendingShrine ||
                 session?.pendingGeoVictories?.length
             );
+            if (!hasPendingModalState) return false;
 
-            const buttons = Array.from(document.querySelectorAll('button:not([disabled])'));
+            const modalRoot = this.getModalRoot();
+            const allButtons = Array.from(document.querySelectorAll('button:not([disabled])'))
+                .filter((btn) => !btn.id?.includes('ai-btn') && this.isVisible(btn));
+            const buttons = modalRoot
+                ? Array.from(modalRoot.querySelectorAll('button:not([disabled])'))
+                    .filter((btn) => !btn.id?.includes('ai-btn') && this.isVisible(btn))
+                : allButtons;
+
             let candidateBtn = null;
             let isKeepPlayingBtn = false;
 
             if (session?.pendingShrine) {
-                for (const btn of buttons) {
-                    if (btn.id?.includes('ai-btn')) continue;
-                    const text = (btn.textContent || '').trim().toLowerCase();
-                    const ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
-                    const combined = `${text} ${ariaLabel}`;
-                    if (combined.includes('walk') || combined.includes('leave') || combined.includes('离开') || combined.includes('走开')) {
-                        candidateBtn = btn;
-                        break;
-                    }
-                }
+                candidateBtn = buttons.find((btn) =>
+                    /walk|leave|离开|走开/.test(this.buttonLabel(btn))
+                ) || null;
             }
 
             if (!candidateBtn && session?.pendingGeoVictories?.length) {
-                for (const btn of buttons) {
-                    if (btn.id?.includes('ai-btn')) continue;
-                    const text = (btn.textContent || '').trim().toLowerCase();
-                    const ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
-                    const combined = `${text} ${ariaLabel}`;
-                    if (combined.includes('keep playing') || combined.includes('继续')) {
-                        candidateBtn = btn;
-                        isKeepPlayingBtn = true;
-                        break;
-                    }
-                }
+                candidateBtn = buttons.find((btn) =>
+                    /keep playing|继续/.test(this.buttonLabel(btn))
+                ) || null;
+                isKeepPlayingBtn = Boolean(candidateBtn);
+            }
+
+            if (!candidateBtn && session?.pendingReward) {
+                candidateBtn = buttons.find((btn) =>
+                    /choose|select|选择|确认/.test(this.buttonLabel(btn))
+                ) || (modalRoot ? buttons[0] : null);
+            }
+
+            if (!candidateBtn && session?.pendingChest) {
+                candidateBtn = buttons.find((btn) =>
+                    /take|claim|open|loot|领取|打开|拿走/.test(this.buttonLabel(btn))
+                ) || (modalRoot ? buttons[0] : null);
             }
 
             if (!candidateBtn) {
-                for (const btn of buttons) {
-                    if (btn.id?.includes('ai-btn')) continue;
-
-                    const isVisible = btn.offsetWidth > 0 || btn.offsetHeight > 0 || btn.getClientRects().length > 0;
-                    if (!isVisible) continue;
-
-                    const text = (btn.textContent || '').trim().toLowerCase();
-                    const ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
-                    const combined = `${text} ${ariaLabel}`;
-
-                    const isKeywordMatch = CONFIG.MODAL_KEYWORDS.some((kw) => combined.includes(kw));
-                    const isInsideModal = Boolean(btn.closest('div[class*="z-"]') || btn.closest('.hud-frame'));
-
-                    if (isKeywordMatch || (hasPendingModalState && isInsideModal)) {
-                        candidateBtn = btn;
-                        break;
-                    }
-                }
+                // 只在弹窗按钮中按关键词兜底；没有弹窗时绝不点 HUD。
+                candidateBtn = buttons.find((btn) =>
+                    CONFIG.MODAL_KEYWORDS.some((kw) => this.buttonLabel(btn).includes(kw))
+                ) || null;
             }
 
-            if (candidateBtn) {
-                const shouldClick = session?.pendingShrine || (isKeepPlayingBtn ? autoKeepPlaying : autoPick);
-                if (shouldClick) {
-                    this.triggerButtonClick(candidateBtn);
-                    if (typeof onAction === 'function') {
-                        const actionName = candidateBtn.textContent.trim() || candidateBtn.getAttribute('aria-label') || 'Action';
-                        onAction(actionName);
-                    }
-                    return false;
-                }
+            if (!candidateBtn) {
+                // 弹窗已出现但按钮还没渲染/被禁用：保持暂停，下一帧再试。
                 return true;
             }
 
-            return hasPendingModalState;
+            const shouldClick = session?.pendingShrine
+                ? true
+                : isKeepPlayingBtn
+                    ? autoKeepPlaying
+                    : autoPick;
+
+            if (!shouldClick) {
+                return true;
+            }
+
+            this.triggerButtonClick(candidateBtn);
+            if (typeof onAction === 'function') {
+                const actionName = candidateBtn.textContent.trim() || candidateBtn.getAttribute('aria-label') || 'Action';
+                onAction(actionName);
+            }
+            return false;
         }
     }
 
@@ -781,7 +817,7 @@
             flashCheckbox.style.marginRight = '6px';
             flashCheckbox.onchange = (e) => this.setAntiFlashEnabled(e.target.checked);
             flashLabel.appendChild(flashCheckbox);
-            flashLabel.appendChild(document.createTextNode('屏蔽升级黄光闪烁'));
+            flashLabel.appendChild(document.createTextNode('屏蔽升级/受伤闪烁与遮罩'));
 
             const tip = document.createElement('div');
             tip.textContent = '快捷键: 空格 / ESC 紧急暂停';
@@ -805,11 +841,21 @@
                     this.antiFlashStyleTag = document.createElement('style');
                     this.antiFlashStyleTag.id = 'ws-anti-flash-style';
                     this.antiFlashStyleTag.textContent = `
-                        .hud-flash-level {
+                        .hud-flash,
+                        [class*="hud-flash"] {
                             display: none !important;
                             opacity: 0 !important;
                             visibility: hidden !important;
                             animation: none !important;
+                            transition: none !important;
+                        }
+                        /* 升级弹窗的全屏遮罩：只去掉黑色蒙层，保留卡片和按钮 */
+                        div.absolute.inset-0.z-30[class*="bg-black/"] {
+                            background-color: transparent !important;
+                            background-image: none !important;
+                            backdrop-filter: none !important;
+                            animation: none !important;
+                            transition: none !important;
                         }
                     `;
                     document.head.appendChild(this.antiFlashStyleTag);
